@@ -1,0 +1,17 @@
+.git
+.github
+.gradle
+.idea
+.wrangler
+dist
+node_modules
+test
+data
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+local.properties
+tmp
+artifacts

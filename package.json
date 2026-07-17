@@ -1,0 +1,24 @@
+{
+  "name": "yukine-metadata-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "check": "npm run check:worker && npm run check:node",
+    "check:worker": "tsc -p tsconfig.worker.json --noEmit",
+    "check:node": "tsc -p tsconfig.node.json --noEmit",
+    "build:node": "tsc -p tsconfig.node.json",
+    "test": "tsx --test test/*.test.ts",
+    "start": "node dist/node/server.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "dry-run": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260716.1",
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.111.0"
+  }
+}

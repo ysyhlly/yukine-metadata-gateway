@@ -1,0 +1,126 @@
+name: Metadata gateway container
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "gateway-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer image version, for example 1.2.3 or 1.2.3-rc.1"
+        required: true
+        type: string
+
+env:
+  IMAGE_NAME: ghcr.io/ysyhlly/yukine-metadata-gateway
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.18.0"
+          cache: npm
+
+      - name: Check Worker and Node contracts
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run build:node
+          npm run dry-run
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate multi-architecture image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/gateway-v') || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve release tags
+        id: release
+        shell: bash
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/gateway-v* ]]; then
+            version="${GITHUB_REF_NAME#gateway-v}"
+          else
+            version="${MANUAL_VERSION}"
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid gateway version: ${version}" >&2
+            exit 1
+          fi
+          short_sha="${GITHUB_SHA:0:12}"
+          tags="${IMAGE_NAME}:${version},${IMAGE_NAME}:sha-${short_sha}"
+          if [[ "${version}" != *-* ]]; then
+            tags="${tags},${IMAGE_NAME}:latest"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tags=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate OCI labels
+        id: metadata
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+
+      - name: Build and publish multi-architecture image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.release.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

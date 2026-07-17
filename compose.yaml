@@ -1,0 +1,42 @@
+services:
+  metadata-gateway:
+    image: ghcr.io/ysyhlly/yukine-metadata-gateway:${GATEWAY_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      CACHE_DB_PATH: "/data/metadata-cache.sqlite"
+      CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-3600}"
+      CACHE_MAX_ENTRIES: "${CACHE_MAX_ENTRIES:-10000}"
+      UPSTREAM_TIMEOUT_MS: "${UPSTREAM_TIMEOUT_MS:-4500}"
+      REQUEST_TIMEOUT_MS: "${REQUEST_TIMEOUT_MS:-10000}"
+      APP_USER_AGENT: "${APP_USER_AGENT:-Yukine-Metadata-Gateway/1.0 (https://github.com/ysyhlly/yukine-metadata-gateway)}"
+      ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
+    volumes:
+      - metadata-gateway-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  metadata-gateway-data:

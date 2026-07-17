@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/workers-types"],
+    "noEmit": true
+  },
+  "include": [
+    "src/core.ts",
+    "src/index.ts",
+    "src/transport.ts",
+    "src/types.ts"
+  ]
+}

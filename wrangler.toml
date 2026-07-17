@@ -1,0 +1,9 @@
+name = "yukine-metadata-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+
+[vars]
+APP_USER_AGENT = "Yukine-Metadata-Gateway/1.0 (https://github.com/ysyhlly/yukine-metadata-gateway)"
+
+# Set the secret before deployment:
+#   npx wrangler secret put ACOUSTID_API_KEY

@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+dist/
+data/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+tmp/
+artifacts/
