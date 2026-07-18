@@ -11,6 +11,7 @@ FROM node:24.18.0-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build /app/dist ./dist
+COPY assets ./assets
 COPY package.json ./
 RUN mkdir -p /data && chown node:node /data
 

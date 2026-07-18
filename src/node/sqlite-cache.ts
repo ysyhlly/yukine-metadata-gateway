@@ -89,6 +89,16 @@ export class SqliteJsonCache implements UpstreamJsonCache {
     this.database.close();
   }
 
+  stats(): { entries: number; maxEntries: number } {
+    const row = this.database.prepare(
+      "SELECT COUNT(*) AS count FROM upstream_json_cache"
+    ).get() as { count: number };
+    return {
+      entries: Number(row.count),
+      maxEntries: this.maxEntries
+    };
+  }
+
   private cleanup(now: number): void {
     this.database.prepare("DELETE FROM upstream_json_cache WHERE expires_at <= ?").run(now);
     const row = this.database.prepare(

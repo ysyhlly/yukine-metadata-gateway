@@ -25,7 +25,7 @@ npm run build:node
 npm run dry-run
 ```
 
-启动 Node 服务：
+启动 Node 服务（默认不启用管理面板）：
 
 ```bash
 HOST=127.0.0.1 PORT=8787 CACHE_DB_PATH=./data/cache.sqlite npm start
@@ -33,16 +33,38 @@ HOST=127.0.0.1 PORT=8787 CACHE_DB_PATH=./data/cache.sqlite npm start
 
 Node 启动时必须成功打开 SQLite；数据库损坏或不可写时进程会直接退出。请求日志只包含 request ID、路由、状态、耗时、缓存命中和上游主机/状态，不包含标题、查询串、指纹或密钥。
 
+## 可视化监控面板
+
+Node/Docker 运行时提供 `/admin` 监控面板；Cloudflare Worker 不包含该入口。面板统计 `/v1/*` 业务请求的请求量、可用率、端到端延迟、SQLite 缓存命中率、状态码、路由和上游主机状态，排除 `/health` 与面板自身流量。分钟级指标保存在独立 SQLite 数据库，默认保留 30 天，容器重启后仍可读取。
+
+首次启用时必须提供至少 32 个字符的一次性引导令牌，否则新数据库会拒绝启动：
+
+```bash
+export DASHBOARD_SETUP_TOKEN="$(openssl rand -base64 32)"
+export DASHBOARD_ENABLED=true
+export DASHBOARD_PUBLIC_ORIGIN=https://metadata.example.com
+export DASHBOARD_DB_PATH=./data/dashboard.sqlite
+npm start
+```
+
+打开 `https://metadata.example.com/admin/setup#一次性引导令牌`，设置 3–64 字符的登录账号和至少 12 字节的密码。令牌放在 URL fragment 中，不会发送给服务器或进入访问日志；页面读取后会立即从地址栏移除。设置成功后应从部署环境删除 `DASHBOARD_SETUP_TOKEN` 并重启，已有管理员不会受影响。
+
+密码使用带随机盐的 scrypt 保存；会话令牌只以 SHA-256 摘要写入 SQLite。Cookie 为 `Secure`、`HttpOnly`、`SameSite=Strict`，默认闲置 30 分钟、最长 8 小时。设置、登录和退出接口要求固定 `DASHBOARD_PUBLIC_ORIGIN` 的同源请求，退出还要求会话 CSRF token。
+
 ## Docker Compose
 
 本地构建：
 
 ```bash
+printf 'DASHBOARD_SETUP_TOKEN=%s\n' "$(openssl rand -base64 32)" > .env
+printf 'DASHBOARD_PUBLIC_ORIGIN=http://localhost:8787\n' >> .env
 docker compose build
 docker compose up -d
 docker compose ps
 curl http://127.0.0.1:8787/health
 ```
+
+首次启动后从 `.env` 读取令牌，并访问 `http://localhost:8787/admin/setup#该令牌` 完成初始化。生产环境必须使用 HTTPS；HTTP 仅允许 `localhost`、`127.0.0.1` 或 `::1` 的本地开发来源。
 
 从 GHCR 拉取：
 
@@ -61,8 +83,16 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `CACHE_MAX_ENTRIES`（默认 10000）
 - `UPSTREAM_TIMEOUT_MS`（默认 4500）
 - `REQUEST_TIMEOUT_MS`（默认 10000）
+- `TRUST_PROXY`（直接运行默认 `false`；Compose 在仅由本机反向代理转发时默认 `true`）
 - `APP_USER_AGENT`
 - 可选 `ACOUSTID_API_KEY`
+- `DASHBOARD_ENABLED`（Compose 默认 `true`，直接运行 Node 默认 `false`）
+- `DASHBOARD_DB_PATH`（Compose 为 `/data/dashboard.sqlite`）
+- `DASHBOARD_PUBLIC_ORIGIN`（浏览器访问面板的固定 origin）
+- 首次启动必需的 `DASHBOARD_SETUP_TOKEN`（至少 32 字符，设置成功后删除）
+- `DASHBOARD_SESSION_IDLE_SECONDS`（默认 1800）
+- `DASHBOARD_SESSION_ABSOLUTE_SECONDS`（默认 28800）
+- `DASHBOARD_METRICS_RETENTION_DAYS`（默认 30）
 
 ### 数据卷备份
 
@@ -116,12 +146,13 @@ Android 会继续使用 Room 响应缓存和端点健康状态：身份元数据
 
 ## 公网部署
 
-Node 默认无鉴权且不提供浏览器 CORS。公网部署必须放在反向代理之后，由代理负责：
+业务 API 默认无鉴权且不提供浏览器 CORS；管理面板有独立登录。公网部署必须放在反向代理之后，由代理负责：
 
 - TLS 终止及 HTTP 到 HTTPS 跳转；
 - 访问控制（如需要）；
 - 按 IP/令牌限流和并发限制；
-- 仅转发 `GET` API，不记录查询串；
+- 业务 API 仅转发 `GET`；只为 `/admin/api/setup`、`/admin/api/login` 和 `/admin/api/logout` 放行 `POST`；
+- 对设置和登录接口施加更严格的按 IP 限流，不记录查询串或请求体；
 - 请求体禁用或限制，响应超时略大于网关的 10 秒总期限。
 
 不要直接把 Compose 的端口绑定改成 `0.0.0.0` 暴露到公网。
