@@ -236,6 +236,8 @@ function baseConfig(directory: string) {
     cacheMaxEntries: 10_000,
     upstreamTimeoutMs: 500,
     requestTimeoutMs: 2_000,
+    maxConcurrentRequests: 500,
+    maxRequestsPerSecond: 500,
     appUserAgent: "GatewayDashboardTest/1.0"
   };
 }

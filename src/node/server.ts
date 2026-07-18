@@ -28,13 +28,27 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     cache.close();
     throw error;
   }
+  const concurrency = new RequestConcurrencyLimiter(config.maxConcurrentRequests);
+  const requestRate = new RequestRateLimiter(config.maxRequestsPerSecond);
   const server = createServer(
     {
       maxHeaderSize: 64 * 1024,
       requestTimeout: config.requestTimeoutMs
     },
     async (request, response) => {
-      await serveRequest(request, response, config, transport, dashboard);
+      if (!requestRate.tryAcquire()) {
+        serveRateLimited(request, response);
+        return;
+      }
+      if (!concurrency.tryAcquire()) {
+        serveBusy(request, response);
+        return;
+      }
+      try {
+        await serveRequest(request, response, config, transport, dashboard);
+      } finally {
+        concurrency.release();
+      }
     }
   );
   server.headersTimeout = config.requestTimeoutMs;
@@ -56,7 +70,49 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
   };
   process.once("SIGINT", close);
   process.once("SIGTERM", close);
-  return { server, close, cache, dashboard };
+  return { server, close, cache, dashboard, concurrency, requestRate };
+}
+
+export class RequestConcurrencyLimiter {
+  private active = 0;
+
+  constructor(readonly maximum: number) {}
+
+  tryAcquire(): boolean {
+    if (this.active >= this.maximum) return false;
+    this.active += 1;
+    return true;
+  }
+
+  release(): void {
+    this.active = Math.max(0, this.active - 1);
+  }
+
+  get activeRequests(): number {
+    return this.active;
+  }
+}
+
+export class RequestRateLimiter {
+  private windowStartedAt = 0;
+  private requests = 0;
+
+  constructor(readonly maximumPerSecond: number) {}
+
+  tryAcquire(now = Date.now()): boolean {
+    const windowStartedAt = Math.floor(now / 1_000) * 1_000;
+    if (windowStartedAt !== this.windowStartedAt) {
+      this.windowStartedAt = windowStartedAt;
+      this.requests = 0;
+    }
+    if (this.requests >= this.maximumPerSecond) return false;
+    this.requests += 1;
+    return true;
+  }
+
+  get requestsInCurrentWindow(): number {
+    return this.requests;
+  }
 }
 
 async function serveRequest(
@@ -152,6 +208,48 @@ function writeDashboardResponse(
   response.end(result.body);
 }
 
+function serveBusy(request: IncomingMessage, response: ServerResponse): void {
+  const startedAt = Date.now();
+  const requestId = randomUUID();
+  const route = safeRoute(request.url);
+  request.resume();
+  response.writeHead(503, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Retry-After": "1",
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.end(JSON.stringify({ error: "server_busy", requestId }));
+  writeLog(
+    requestId,
+    route,
+    503,
+    startedAt,
+    { cacheHit: false, upstream: [] }
+  );
+}
+
+function serveRateLimited(request: IncomingMessage, response: ServerResponse): void {
+  const startedAt = Date.now();
+  const requestId = randomUUID();
+  const route = safeRoute(request.url);
+  request.resume();
+  response.writeHead(429, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Retry-After": "1",
+    "X-Content-Type-Options": "nosniff"
+  });
+  response.end(JSON.stringify({ error: "server_rate_limited", requestId }));
+  writeLog(
+    requestId,
+    route,
+    429,
+    startedAt,
+    { cacheHit: false, upstream: [] }
+  );
+}
+
 function writeLog(
   requestId: string,
   route: string,
@@ -181,6 +279,14 @@ function clientAddress(request: IncomingMessage, trustProxy: boolean): string {
     if (typeof proxied === "string" && proxied.length <= 64 && isIP(proxied)) return proxied;
   }
   return remoteAddress;
+}
+
+function safeRoute(value: string | undefined): string {
+  try {
+    return new URL(value || "/", "http://localhost").pathname;
+  } catch {
+    return "/";
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

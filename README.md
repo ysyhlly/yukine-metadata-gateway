@@ -83,6 +83,8 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `CACHE_MAX_ENTRIES`（默认 10000）
 - `UPSTREAM_TIMEOUT_MS`（默认 4500）
 - `REQUEST_TIMEOUT_MS`（默认 10000）
+- `MAX_CONCURRENT_REQUESTS`（默认 500；Node 正在处理的请求达到上限后返回 `503 server_busy`）
+- `MAX_REQUESTS_PER_SECOND`（默认 500；Node 每秒请求达到上限后返回 `429 server_rate_limited`）
 - `TRUST_PROXY`（直接运行默认 `false`；Compose 在仅由本机反向代理转发时默认 `true`）
 - `APP_USER_AGENT`
 - 可选 `ACOUSTID_API_KEY`
@@ -154,6 +156,23 @@ Android 会继续使用 Room 响应缓存和端点健康状态：身份元数据
 - 业务 API 仅转发 `GET`；只为 `/admin/api/setup`、`/admin/api/login` 和 `/admin/api/logout` 放行 `POST`；
 - 对设置和登录接口施加更严格的按 IP 限流，不记录查询串或请求体；
 - 请求体禁用或限制，响应超时略大于网关的 10 秒总期限。
+
+生产反向代理应设置与 Node 一致的并发上限和每 IP 请求速率：
+
+```nginx
+limit_conn_zone $server_name zone=metadata_gateway_connections:10m;
+limit_req_zone $binary_remote_addr zone=metadata_gateway:10m rate=500r/s;
+
+server {
+    limit_conn metadata_gateway_connections 500;
+    limit_conn_status 503;
+
+    location / {
+        limit_req zone=metadata_gateway burst=500 nodelay;
+        limit_req_status 429;
+    }
+}
+```
 
 不要直接把 Compose 的端口绑定改成 `0.0.0.0` 暴露到公网。
 

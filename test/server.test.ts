@@ -4,7 +4,32 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { startNodeGateway } from "../src/node/server.js";
+import {
+  RequestConcurrencyLimiter,
+  RequestRateLimiter,
+  startNodeGateway
+} from "../src/node/server.js";
+
+test("Node request concurrency limiter rejects work above its configured maximum", () => {
+  const limiter = new RequestConcurrencyLimiter(2);
+  assert.equal(limiter.tryAcquire(), true);
+  assert.equal(limiter.tryAcquire(), true);
+  assert.equal(limiter.activeRequests, 2);
+  assert.equal(limiter.tryAcquire(), false);
+  limiter.release();
+  assert.equal(limiter.tryAcquire(), true);
+  assert.equal(limiter.activeRequests, 2);
+});
+
+test("Node request rate limiter enforces a fixed per-second maximum", () => {
+  const limiter = new RequestRateLimiter(2);
+  assert.equal(limiter.tryAcquire(1_000), true);
+  assert.equal(limiter.tryAcquire(1_500), true);
+  assert.equal(limiter.requestsInCurrentWindow, 2);
+  assert.equal(limiter.tryAcquire(1_999), false);
+  assert.equal(limiter.tryAcquire(2_000), true);
+  assert.equal(limiter.requestsInCurrentWindow, 1);
+});
 
 test("Node adapter serves the shared health and method contracts", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "yukine-gateway-server-"));
@@ -19,6 +44,8 @@ test("Node adapter serves the shared health and method contracts", async (contex
     cacheMaxEntries: 10_000,
     upstreamTimeoutMs: 500,
     requestTimeoutMs: 1_000,
+    maxConcurrentRequests: 500,
+    maxRequestsPerSecond: 500,
     appUserAgent: "GatewayServerTest/1.0"
   });
   if (!runtime.server.listening) await once(runtime.server, "listening");

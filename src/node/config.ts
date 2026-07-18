@@ -9,6 +9,8 @@ export interface NodeGatewayConfig {
   cacheMaxEntries: number;
   upstreamTimeoutMs: number;
   requestTimeoutMs: number;
+  maxConcurrentRequests: number;
+  maxRequestsPerSecond: number;
   appUserAgent: string;
   acoustidApiKey?: string;
   dashboard?: DashboardConfig;
@@ -26,6 +28,8 @@ export function loadNodeGatewayConfig(env: NodeJS.ProcessEnv = process.env): Nod
     cacheMaxEntries: integer(env.CACHE_MAX_ENTRIES, 1, 1_000_000, 10_000),
     upstreamTimeoutMs: integer(env.UPSTREAM_TIMEOUT_MS, 100, 60_000, 4_500),
     requestTimeoutMs: integer(env.REQUEST_TIMEOUT_MS, 100, 120_000, 10_000),
+    maxConcurrentRequests: integer(env.MAX_CONCURRENT_REQUESTS, 1, 10_000, 500),
+    maxRequestsPerSecond: integer(env.MAX_REQUESTS_PER_SECOND, 1, 100_000, 500),
     appUserAgent: env.APP_USER_AGENT?.trim()
       || "Yukine-Metadata-Gateway/1.0 (https://github.com/ysyhlly/yukine-metadata-gateway)",
     acoustidApiKey: env.ACOUSTID_API_KEY?.trim() || undefined,
