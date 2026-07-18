@@ -84,7 +84,7 @@ test("iTunes artwork accepts only HTTPS mzstatic subdomains", async () => {
   assert.equal(recordings[1]?.coverUrl, "");
 });
 
-test("Wikidata artist avatar enrichment remains best-effort and identity-safe", async () => {
+test("Wikidata artist profile enrichment prefers Chinese descriptions", async () => {
   const transport = new FixtureTransport((url) => {
     if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
       return success(url, {
@@ -107,6 +107,10 @@ test("Wikidata artist avatar enrichment remains best-effort and identity-safe", 
           Q123: {
             claims: {
               P18: [{ mainsnak: { datavalue: { value: "Aimer portrait.jpg" } } }]
+            },
+            descriptions: {
+              en: { language: "en", value: "Japanese singer and lyricist" },
+              zh: { language: "zh", value: "日本女歌手及作词家" }
             }
           }
         }
@@ -116,13 +120,61 @@ test("Wikidata artist avatar enrichment remains best-effort and identity-safe", 
   });
 
   const response = await request("/v1/artists/search?name=Aimer", transport);
-  const artist = (response.body as { artists: Array<{ avatarUrl: string }> }).artists[0];
+  const artist = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists[0];
+  const wikidataRequest = transport.urls.find((url) => url.hostname === "www.wikidata.org");
 
   assert.equal(response.status, 200);
   assert.equal(
     artist?.avatarUrl,
     "https://commons.wikimedia.org/wiki/Special:Redirect/file/Aimer%20portrait.jpg?width=512"
   );
+  assert.equal(artist?.description, "日本女歌手及作词家");
+  assert.equal(wikidataRequest?.searchParams.get("props"), "claims|descriptions");
+  assert.equal(wikidataRequest?.searchParams.get("languages"), "zh|zh-hans|zh-hant|en");
+});
+
+test("Wikidata artist profile uses English description when Chinese is unavailable", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, {
+        artists: [{ id: RECORDING_ID, name: "Aimer", score: 100 }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, {
+        id: RECORDING_ID,
+        name: "Aimer",
+        relations: [{
+          type: "wikidata",
+          url: { resource: "https://www.wikidata.org/wiki/Q123" }
+        }]
+      });
+    }
+    if (url.hostname === "www.wikidata.org") {
+      return success(url, {
+        entities: {
+          Q123: {
+            claims: {},
+            descriptions: {
+              en: { language: "en", value: "Japanese singer and lyricist" }
+            }
+          }
+        }
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v1/artists/search?name=Aimer", transport);
+  const artist = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists[0];
+
+  assert.equal(response.status, 200);
+  assert.equal(artist?.avatarUrl, "");
+  assert.equal(artist?.description, "Japanese singer and lyricist");
 });
 
 test("artist detail enhancement failure preserves the successful base result", async () => {
@@ -136,10 +188,14 @@ test("artist detail enhancement failure preserves the successful base result", a
   });
 
   const response = await request("/v1/artists/search?name=Artist", transport);
-  const artists = (response.body as { artists: unknown[] }).artists;
+  const artists = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists;
 
   assert.equal(response.status, 200);
   assert.equal(artists.length, 1);
+  assert.equal(artists[0]?.avatarUrl, "");
+  assert.equal(artists[0]?.description, "");
 });
 
 test("lyrics races exact and search and selects the first usable record", async () => {

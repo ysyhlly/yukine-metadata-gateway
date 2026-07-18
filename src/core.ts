@@ -33,6 +33,11 @@ interface AttemptSummary {
   reachable: number;
 }
 
+interface ArtistProfileEnhancement {
+  avatarUrl: string;
+  description: string;
+}
+
 const MB = "https://musicbrainz.org/ws/2/";
 const ITUNES = "https://itunes.apple.com/search";
 const ACOUSTID = "https://api.acoustid.org/v2/lookup";
@@ -219,18 +224,21 @@ async function artists(
       artistMbid: string(item.id),
       wikidataUrl: string(object(wikidata?.url).resource),
       avatarUrl: "",
+      description: "",
       score: number(item.score, artistMbid ? 100 : 0) / 100
     };
   }).filter((item) => item.id && item.name);
   const firstResult = response[0];
   if (firstResult?.wikidataUrl) {
-    firstResult.avatarUrl = await wikidataAvatarUrl(
+    const enhancement = await wikidataArtistProfile(
       firstResult.wikidataUrl,
       headers,
       request,
       context,
       trace
     );
+    firstResult.avatarUrl = enhancement.avatarUrl;
+    firstResult.description = enhancement.description;
   }
   return result({ artists: response }, 200, trace, 86_400);
 }
@@ -286,32 +294,51 @@ async function lyrics(
   }, 200, trace, 3_600);
 }
 
-async function wikidataAvatarUrl(
+async function wikidataArtistProfile(
   wikidataUrl: string,
   headers: Record<string, string>,
   request: GatewayRequest,
   context: GatewayContext,
   trace: RequestTrace
-): Promise<string> {
+): Promise<ArtistProfileEnhancement> {
   const match = wikidataUrl.match(/\/(Q\d+)(?:[/?#]|$)/i);
   const entityId = match?.[1]?.toUpperCase() || "";
-  if (!/^Q\d+$/.test(entityId)) return "";
+  if (!/^Q\d+$/.test(entityId)) return emptyArtistProfile();
   const query = new URLSearchParams({
     action: "wbgetentities",
     ids: entityId,
-    props: "claims",
+    props: "claims|descriptions",
+    languages: "zh|zh-hans|zh-hant|en",
+    languagefallback: "1",
     format: "json",
     formatversion: "2"
   });
   const response = await upstream(`${WIKIDATA_API}?${query}`, headers, request, context, trace);
-  if (response.kind !== "success") return "";
+  if (response.kind !== "success") return emptyArtistProfile();
   const body = object(response.data);
   const entity = object(object(body.entities)[entityId]);
   const imageClaim = object(array(object(entity.claims), "P18")[0]);
   const mainSnak = object(imageClaim.mainsnak);
   const fileName = string(object(mainSnak.datavalue).value).trim();
-  if (!fileName) return "";
-  return `https://commons.wikimedia.org/wiki/Special:Redirect/file/${encodeURIComponent(fileName)}?width=512`;
+  return {
+    avatarUrl: fileName
+      ? `https://commons.wikimedia.org/wiki/Special:Redirect/file/${encodeURIComponent(fileName)}?width=512`
+      : "",
+    description: wikidataDescription(entity)
+  };
+}
+
+function wikidataDescription(entity: Record<string, unknown>): string {
+  const descriptions = object(entity.descriptions);
+  for (const language of ["zh-hans", "zh", "zh-hant", "en"]) {
+    const value = string(object(descriptions[language]).value).trim();
+    if (value) return value.slice(0, 1_000);
+  }
+  return "";
+}
+
+function emptyArtistProfile(): ArtistProfileEnhancement {
+  return { avatarUrl: "", description: "" };
 }
 
 async function acoustIdLookup(

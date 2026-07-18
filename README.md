@@ -11,7 +11,9 @@
 
 录音接口的 `coverUrl` 只会返回 MusicBrainz 已声明 front artwork 的 Cover Art Archive URL，或 HTTPS `*.mzstatic.com` iTunes 图片。歌词接口接受必填 `title`，以及可选 `artist`、`album`、`durationMs`；无结果返回 `{"lyrics":null}`。
 
-所有基础查询均失败时返回 `502 upstream_failure`。已知 404、合法空结果和头像/封面等附加增强失败不会把基础结果升级为 502。
+艺人接口的每个 `artists[]` 都包含 `avatarUrl` 和 `description` 字符串。首个匹配结果会通过 MusicBrainz 关联的 Wikidata 实体增强：头像读取 `P18`，介绍优先使用简体中文或中文描述，缺失时回退英文；没有可信内容时相应字段为空字符串。
+
+所有基础查询均失败时返回 `502 upstream_failure`。已知 404、合法空结果和头像、介绍、封面等附加增强失败不会把基础结果升级为 502。
 
 ## 本地检查
 
