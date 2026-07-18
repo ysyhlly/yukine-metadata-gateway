@@ -1,9 +1,13 @@
 import type {
   AdminRecord,
   NewSession,
+  ProviderHealthSampleRow,
+  ProviderMetricRow,
   RequestMetricRow,
+  RuntimeSampleRow,
   SessionRecord,
   StoredRequestMetric,
+  StoredProviderMetric,
   StoredUpstreamSummary,
   UpstreamMetricRow
 } from "./dashboard-store.js";
@@ -23,6 +27,14 @@ export interface DashboardStoreAdapter {
   ): Awaitable<void>;
   readRequestMetrics(since: number): Awaitable<StoredRequestMetric[]>;
   readUpstreamSummary(since: number): Awaitable<StoredUpstreamSummary[]>;
+  writeProviderMetrics(rows: ProviderMetricRow[]): Awaitable<void>;
+  readProviderMetrics(since: number): Awaitable<StoredProviderMetric[]>;
+  writeRuntimeSamples(
+    runtime: RuntimeSampleRow,
+    providers: ProviderHealthSampleRow[]
+  ): Awaitable<void>;
+  readRuntimeSamples(since: number): Awaitable<RuntimeSampleRow[]>;
+  readProviderHealth(since: number): Awaitable<ProviderHealthSampleRow[]>;
   cleanup(now: number): Awaitable<void>;
   close(): Awaitable<void>;
   ready?(): Awaitable<boolean>;

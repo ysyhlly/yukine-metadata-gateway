@@ -40,8 +40,30 @@ export async function migrateDashboardSqliteToPostgres(options: {
       FROM dashboard_upstream_minute
       ORDER BY bucket_start_ms, route, host, outcome
     `).all() as Array<Record<string, string | number>>;
+    const providers = readOptionalTable(
+      sqlite,
+      "dashboard_provider_minute",
+      "bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer"
+    );
+    const runtimeSamples = readOptionalTable(
+      sqlite,
+      "dashboard_runtime_sample",
+      "bucket_start_ms, instance_id"
+    );
+    const providerHealth = readOptionalTable(
+      sqlite,
+      "dashboard_provider_health_sample",
+      "bucket_start_ms, instance_id, provider"
+    );
     const migrationId = createHash("sha256")
-      .update(JSON.stringify({ admin, requests, upstream }), "utf8")
+      .update(JSON.stringify({
+        admin,
+        requests,
+        upstream,
+        providers,
+        runtimeSamples,
+        providerHealth
+      }), "utf8")
       .digest("hex");
 
     const initializer = new PostgresDashboardStore({
@@ -121,6 +143,88 @@ export async function migrateDashboardSqliteToPostgres(options: {
           row.attempts
         ]);
       }
+      for (const row of providers) {
+        const columns = [
+          "bucket_start_ms",
+          "route",
+          "provider",
+          "host",
+          "outcome",
+          "cache_state",
+          "cache_layer",
+          "attempts",
+          "duration_sum_ms",
+          "duration_max_ms",
+          ...LATENCY_COLUMNS
+        ];
+        const values = columns.map((column) => row[column]);
+        await client.query(`
+          INSERT INTO dashboard_provider_minute(${columns.join(", ")})
+          VALUES (${values.map((_, index) => `$${index + 1}`).join(", ")})
+          ON CONFLICT(
+            bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer
+          ) DO UPDATE SET
+            ${columns.slice(7).map((column) => `${column} = excluded.${column}`).join(", ")}
+        `, values);
+      }
+      for (const row of runtimeSamples) {
+        const columns = [
+          "bucket_start_ms",
+          "instance_id",
+          "heartbeat_at",
+          "version",
+          "revision",
+          "runtime",
+          "state_backend",
+          "ready",
+          "started_at",
+          "uptime_seconds",
+          "l1_entries",
+          "l1_max_entries",
+          "l2_layer",
+          "l2_entries",
+          "l2_max_entries",
+          "l2_connected",
+          "singleflight_flights",
+          "singleflight_waiters",
+          "ingress_active",
+          "ingress_limit",
+          "requests_this_second",
+          "rate_limit"
+        ];
+        const values = columns.map((column) => {
+          if (column === "ready" || column === "l2_connected") {
+            return Boolean(row[column]);
+          }
+          return row[column];
+        });
+        await client.query(`
+          INSERT INTO dashboard_runtime_sample(${columns.join(", ")})
+          VALUES (${values.map((_, index) => `$${index + 1}`).join(", ")})
+          ON CONFLICT(bucket_start_ms, instance_id) DO UPDATE SET
+            ${columns.slice(2).map((column) => `${column} = excluded.${column}`).join(", ")}
+        `, values);
+      }
+      for (const row of providerHealth) {
+        const columns = [
+          "bucket_start_ms",
+          "instance_id",
+          "provider",
+          "state",
+          "recent_failures",
+          "opened_at",
+          "active",
+          "queued",
+          "concurrency_limit"
+        ];
+        const values = columns.map((column) => row[column]);
+        await client.query(`
+          INSERT INTO dashboard_provider_health_sample(${columns.join(", ")})
+          VALUES (${values.map((_, index) => `$${index + 1}`).join(", ")})
+          ON CONFLICT(bucket_start_ms, instance_id, provider) DO UPDATE SET
+            ${columns.slice(3).map((column) => `${column} = excluded.${column}`).join(", ")}
+        `, values);
+      }
       await client.query(
         "INSERT INTO gateway_data_migrations(migration_id, applied_at) VALUES ($1, $2)",
         [migrationId, Date.now()]
@@ -137,6 +241,24 @@ export async function migrateDashboardSqliteToPostgres(options: {
   } finally {
     sqlite.close();
   }
+}
+
+function readOptionalTable(
+  sqlite: DatabaseSync,
+  table: string,
+  orderBy: string
+): Array<Record<string, string | number | null>> {
+  const exists = sqlite.prepare(`
+    SELECT 1
+    FROM sqlite_master
+    WHERE type = 'table' AND name = ?
+  `).get(table);
+  if (!exists) return [];
+  return sqlite.prepare(`
+    SELECT *
+    FROM ${table}
+    ORDER BY ${orderBy}
+  `).all() as Array<Record<string, string | number | null>>;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

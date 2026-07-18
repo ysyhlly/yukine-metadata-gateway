@@ -52,11 +52,18 @@ test("canceling one singleflight follower does not cancel the shared request", a
     second.signal
   );
   await new Promise((resolve) => setTimeout(resolve, 0));
+  const inFlight = transport.runtimeStats();
+  assert.equal(inFlight.singleflight.flights, 1);
+  assert.equal(inFlight.singleflight.waiters, 2);
+  assert.equal(inFlight.providers.find((provider) => provider.name === "itunes")?.active, 1);
+  assert.equal(inFlight.providers.find((provider) => provider.name === "itunes")?.limit, 20);
   first.abort();
   releaseFetch();
 
   assert.equal((await firstResult).outcome, "aborted");
   assert.equal((await secondResult).kind, "success");
+  assert.equal(transport.runtimeStats().singleflight.flights, 0);
+  assert.equal(transport.runtimeStats().singleflight.waiters, 0);
 });
 
 test("singleflight cancels the shared fetch only after every waiter leaves", async (context) => {
@@ -156,7 +163,11 @@ test("stale cache returns immediately and schedules one refresh", async (context
     return Response.json({ fresh: true });
   };
   const deferred: Promise<void>[] = [];
-  const transport = new JsonFetchTransport({ cache, memoryMaxEntries: 0 });
+  const transport = new JsonFetchTransport({
+    cache,
+    cacheLayer: "sqlite",
+    memoryMaxEntries: 0
+  });
 
   const result = await transport.getJson(
     "https://itunes.apple.com/search?term=Song",
@@ -168,6 +179,7 @@ test("stale cache returns immediately and schedules one refresh", async (context
 
   assert.equal(result.kind, "success");
   assert.equal(result.cacheState, "stale");
+  assert.equal(result.cacheLayer, "sqlite");
   assert.equal(calls, 1);
   assert.equal(cache.puts, 1);
 });

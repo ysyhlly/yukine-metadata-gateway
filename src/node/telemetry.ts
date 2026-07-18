@@ -100,12 +100,14 @@ class OpenTelemetrySink implements TelemetrySink {
       "server.address": attempt.host,
       "gateway.outcome": attempt.outcome || statusOutcome(attempt.status),
       "cache.state": attempt.cacheState || "miss",
+      "cache.layer": attempt.cacheLayer || "none",
       "http.response.status_code": attempt.status
     };
     this.providerRequests.add(1, attributes);
     this.providerLatency.record(attempt.durationMs || 0, attributes);
     this.cacheRequests.add(1, {
       "cache.state": attempt.cacheState || "miss",
+      "cache.layer": attempt.cacheLayer || "none",
       "provider.name": attempt.provider || "unknown"
     });
     const endedAt = Date.now();

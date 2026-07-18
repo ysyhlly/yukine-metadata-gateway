@@ -19,6 +19,7 @@ export class WorkerTelemetrySink implements TelemetrySink {
         attempt.host,
         attempt.outcome || "unknown",
         attempt.cacheState || "miss",
+        attempt.cacheLayer || "none",
         statusClass(attempt.status)
       ],
       doubles: [1, attempt.durationMs || 0]

@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { DashboardConfig } from "./dashboard.js";
 
@@ -24,6 +25,9 @@ export interface NodeGatewayConfig {
   otelServiceName?: string;
   v2Enabled?: boolean;
   v1SunsetDate?: string;
+  instanceId?: string;
+  appVersion?: string;
+  appRevision?: string;
 }
 
 export function loadNodeGatewayConfig(env: NodeJS.ProcessEnv = process.env): NodeGatewayConfig {
@@ -60,6 +64,9 @@ export function loadNodeGatewayConfig(env: NodeJS.ProcessEnv = process.env): Nod
     otelServiceName: env.OTEL_SERVICE_NAME?.trim() || "yukine-metadata-gateway",
     v2Enabled: boolean(env.V2_ENABLED, true),
     v1SunsetDate: httpDate(env.V1_SUNSET_DATE),
+    instanceId: env.INSTANCE_ID?.trim() || hostname(),
+    appVersion: env.APP_VERSION?.trim() || "1.0.0",
+    appRevision: env.APP_REVISION?.trim() || "unknown",
     dashboard: dashboardEnabled
       ? loadDashboardConfig(env, cacheDbPath, stateBackend, databaseUrl)
       : undefined

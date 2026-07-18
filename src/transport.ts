@@ -8,6 +8,7 @@ import {
 } from "./providers/types.js";
 import type {
   CacheEntry,
+  CacheLayer,
   UpstreamJsonCache,
   UpstreamJsonResult,
   UpstreamOutcome,
@@ -32,6 +33,19 @@ export interface JsonFetchTransportOptions {
   staleMs?: number;
   providerPolicies?: Partial<Record<ProviderName, Partial<ProviderPolicy>>>;
   coordinator?: DistributedProviderCoordinator;
+  cacheLayer?: Exclude<CacheLayer, "memory" | "none">;
+}
+
+export interface ProviderRuntimeStats extends ProviderPassiveHealth {
+  active: number;
+  queued: number;
+  limit: number;
+}
+
+export interface TransportRuntimeStats {
+  memory: { entries: number; maxEntries: number };
+  singleflight: { flights: number; waiters: number };
+  providers: ProviderRuntimeStats[];
 }
 
 interface SharedFlight {
@@ -56,6 +70,7 @@ export class JsonFetchTransport implements UpstreamTransport {
   private readonly staleMs: number;
   private readonly policies: Record<ProviderName, ProviderPolicy>;
   private readonly coordinator?: DistributedProviderCoordinator;
+  private readonly cacheLayer: Exclude<CacheLayer, "memory" | "none">;
   private readonly semaphores = new Map<ProviderName, AsyncSemaphore>();
   private readonly breakers = new Map<ProviderName, CircuitBreaker>();
   private readonly pending = new Map<string, SharedFlight>();
@@ -74,6 +89,8 @@ export class JsonFetchTransport implements UpstreamTransport {
     this.staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     this.policies = mergePolicies(options.providerPolicies);
     this.coordinator = options.coordinator;
+    this.cacheLayer = options.cacheLayer
+      ?? (this.cloudflareCache ? "cloudflare" : "sqlite");
     for (const [name, policy] of Object.entries(this.policies) as [ProviderName, ProviderPolicy][]) {
       this.semaphores.set(name, new AsyncSemaphore(policy.concurrency));
       this.breakers.set(name, new CircuitBreaker(policy));
@@ -84,6 +101,24 @@ export class JsonFetchTransport implements UpstreamTransport {
     return {
       entries: this.memory.size,
       maxEntries: this.memoryMaxEntries
+    };
+  }
+
+  runtimeStats(): TransportRuntimeStats {
+    return {
+      memory: this.stats(),
+      singleflight: {
+        flights: this.pending.size,
+        waiters: [...this.pending.values()].reduce(
+          (total, flight) => total + flight.waiters,
+          0
+        )
+      },
+      providers: this.health().map((health) => {
+        const semaphore = this.semaphores.get(health.name)?.stats()
+          ?? { active: 0, queued: 0, limit: this.policies[health.name].concurrency };
+        return { ...health, ...semaphore };
+      })
     };
   }
 
@@ -99,7 +134,13 @@ export class JsonFetchTransport implements UpstreamTransport {
     const now = Date.now();
     const memoryEntry = this.memoryGet(url, now);
     if (memoryEntry) {
-      const cached = this.cachedResult(memoryEntry, host, provider, startedAt);
+      const cached = this.cachedResult(
+        memoryEntry,
+        host,
+        provider,
+        startedAt,
+        "memory"
+      );
       if (cached) {
         if (memoryEntry.freshness === "stale") {
           this.deferRefresh(url, headers, provider, options);
@@ -111,7 +152,13 @@ export class JsonFetchTransport implements UpstreamTransport {
     const stored = await this.cache?.get(url, now);
     if (stored) {
       this.memoryPut(url, stored);
-      const cached = this.cachedResult(stored, host, provider, startedAt);
+      const cached = this.cachedResult(
+        stored,
+        host,
+        provider,
+        startedAt,
+        this.cacheLayer
+      );
       if (cached) {
         if (stored.freshness === "stale") {
           this.deferRefresh(url, headers, provider, options);
@@ -142,7 +189,8 @@ export class JsonFetchTransport implements UpstreamTransport {
     entry: CacheEntry,
     host: string,
     provider: ProviderName,
-    startedAt: number
+    startedAt: number,
+    cacheLayer: CacheLayer
   ): UpstreamJsonResult | null {
     try {
       return {
@@ -153,6 +201,7 @@ export class JsonFetchTransport implements UpstreamTransport {
         provider,
         cacheHit: true,
         cacheState: entry.freshness,
+        cacheLayer,
         durationMs: Date.now() - startedAt,
         outcome: "success"
       };
@@ -210,7 +259,13 @@ export class JsonFetchTransport implements UpstreamTransport {
       const entry = await this.cache.get(url, Date.now());
       if (entry?.freshness === "fresh") {
         this.memoryPut(url, entry);
-        const cached = this.cachedResult(entry, safeHost(url), provider, Date.now());
+        const cached = this.cachedResult(
+          entry,
+          safeHost(url),
+          provider,
+          Date.now(),
+          this.cacheLayer
+        );
         if (cached) return cached;
       }
     }
@@ -317,6 +372,7 @@ export class JsonFetchTransport implements UpstreamTransport {
             provider,
             cacheHit: false,
             cacheState: "miss",
+            cacheLayer: "none",
             durationMs,
             outcome: "not_found"
           };
@@ -355,6 +411,7 @@ export class JsonFetchTransport implements UpstreamTransport {
             provider,
             cacheHit: false,
             cacheState: "miss",
+            cacheLayer: "none",
             durationMs: Date.now() - startedAt,
             outcome: "success"
           };
@@ -472,6 +529,14 @@ class AsyncSemaphore {
   }> = [];
 
   constructor(private readonly maximum: number) {}
+
+  stats(): { active: number; queued: number; limit: number } {
+    return {
+      active: this.active,
+      queued: this.queue.length,
+      limit: this.maximum
+    };
+  }
 
   acquire(signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) return Promise.reject(new Error("aborted"));
@@ -677,6 +742,7 @@ function abortedResult(): UpstreamJsonResult {
     provider: "unknown",
     cacheHit: false,
     cacheState: "miss",
+    cacheLayer: "none",
     durationMs: 0,
     outcome: "aborted"
   };
@@ -696,6 +762,7 @@ function failureResult(
     provider,
     cacheHit: false,
     cacheState: "miss",
+    cacheLayer: "none",
     durationMs,
     outcome
   };

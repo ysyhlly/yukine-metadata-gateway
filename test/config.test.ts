@@ -10,6 +10,9 @@ test("Node config keeps SQLite as the zero-dependency default", () => {
   assert.equal(config.memoryCacheMaxEntries, 1_000);
   assert.equal(config.redisUrl, undefined);
   assert.equal(config.databaseUrl, undefined);
+  assert.ok(config.instanceId);
+  assert.equal(config.appVersion, "1.0.0");
+  assert.equal(config.appRevision, "unknown");
 });
 
 test("external state requires both Redis and PostgreSQL URLs", () => {
@@ -46,4 +49,16 @@ test("OpenTelemetry remains opt-in", () => {
   assert.equal(disabled.otelEndpoint, undefined);
   assert.equal(enabled.otelEndpoint, "http://collector:4318");
   assert.equal(enabled.otelServiceName, "metadata-test");
+});
+
+test("runtime identity can be fixed by deployment metadata", () => {
+  const config = loadNodeGatewayConfig({
+    INSTANCE_ID: "gateway-a",
+    APP_VERSION: "2.4.1",
+    APP_REVISION: "release-20260719"
+  });
+
+  assert.equal(config.instanceId, "gateway-a");
+  assert.equal(config.appVersion, "2.4.1");
+  assert.equal(config.appRevision, "release-20260719");
 });

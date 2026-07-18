@@ -16,6 +16,7 @@ export interface UpstreamAttempt {
   durationMs?: number;
   outcome?: UpstreamOutcome;
   cacheState?: CacheState;
+  cacheLayer?: CacheLayer;
 }
 
 export interface RequestTrace {
@@ -32,6 +33,7 @@ export type UpstreamJsonResult =
       provider?: string;
       cacheHit: boolean;
       cacheState?: CacheState;
+      cacheLayer?: CacheLayer;
       durationMs?: number;
       outcome?: "success";
     }
@@ -42,6 +44,7 @@ export type UpstreamJsonResult =
       provider?: string;
       cacheHit: false;
       cacheState?: "miss";
+      cacheLayer?: CacheLayer;
       durationMs?: number;
       outcome?: "not_found";
     }
@@ -52,11 +55,13 @@ export type UpstreamJsonResult =
       provider?: string;
       cacheHit: false;
       cacheState?: "miss";
+      cacheLayer?: CacheLayer;
       durationMs?: number;
       outcome?: Exclude<UpstreamOutcome, "success" | "not_found">;
     };
 
 export type CacheState = "fresh" | "stale" | "miss";
+export type CacheLayer = "memory" | "sqlite" | "redis" | "cloudflare" | "none";
 
 export type UpstreamOutcome =
   | "success"

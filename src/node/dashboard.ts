@@ -23,6 +23,7 @@ import { DashboardStore, type SessionRecord } from "./dashboard-store.js";
 import type { DashboardStoreAdapter } from "./dashboard-store-adapter.js";
 import { PostgresDashboardStore } from "./postgres-dashboard-store.js";
 import { dashboardPage, loginPage, setupPage } from "./dashboard-ui.js";
+import type { RuntimeStatsProvider } from "./runtime-stats.js";
 
 const EMPTY_TRACE: RequestTrace = { cacheHit: false, upstream: [] };
 const MAX_BODY_BYTES = 16 * 1024;
@@ -61,8 +62,9 @@ export class Dashboard {
 
   constructor(
     private readonly config: DashboardConfig,
-    cacheStats: () => { entries: number; maxEntries: number }
+    runtimeStats: RuntimeStatsProvider | (() => { entries: number; maxEntries: number })
   ) {
+    const runtimeStatsProvider = normalizeRuntimeStats(runtimeStats, config);
     this.store = config.backend === "external"
       ? new PostgresDashboardStore({
           url: requiredDatabaseUrl(config),
@@ -89,7 +91,7 @@ export class Dashboard {
       this.paperBackground = readFileSync(join(config.assetsPath, "paper-petals-bg.jpg"));
       this.metrics = new DashboardMetrics(this.store, {
         retentionDays: config.retentionDays,
-        cacheStats
+        runtimeStats: runtimeStatsProvider
       });
       this.initialization = this.initialize();
     } catch (error) {
@@ -113,9 +115,12 @@ export class Dashboard {
     requestId: string,
     clientIp: string
   ): Promise<DashboardResponse | null> {
+    const method = request.method || "GET";
+    if (method === "GET" && url.pathname === "/favicon.ico") {
+      return asset(this.mascot, "image/png");
+    }
     if (!url.pathname.startsWith("/admin")) return null;
     await this.initialization;
-    const method = request.method || "GET";
 
     if (method === "GET" && url.pathname === "/admin/assets/gateway-mascot.png") {
       return asset(this.mascot, "image/png");
@@ -329,6 +334,53 @@ export class Dashboard {
 function requiredDatabaseUrl(config: DashboardConfig): string {
   if (!config.databaseUrl) throw new Error("dashboard_database_url_required");
   return config.databaseUrl;
+}
+
+function normalizeRuntimeStats(
+  value: RuntimeStatsProvider | (() => { entries: number; maxEntries: number }),
+  config: DashboardConfig
+): RuntimeStatsProvider {
+  if (typeof value !== "function") return value;
+  const startedAt = Date.now();
+  return {
+    snapshot: () => {
+      const now = Date.now();
+      const cache = value();
+      return {
+        instanceId: "test-instance",
+        version: "1.0.0",
+        revision: "unknown",
+        runtime: "node",
+        stateBackend: config.backend === "external" ? "external" : "sqlite",
+        ready: true,
+        heartbeatAt: now,
+        startedAt,
+        uptimeSeconds: Math.max(0, Math.floor((now - startedAt) / 1_000)),
+        cache: {
+          l1: {
+            layer: "memory",
+            entries: 0,
+            maxEntries: 0,
+            connected: true
+          },
+          l2: {
+            layer: config.backend === "external" ? "redis" : "sqlite",
+            entries: cache.entries,
+            maxEntries: cache.maxEntries,
+            connected: true
+          }
+        },
+        singleflight: { flights: 0, waiters: 0 },
+        ingress: {
+          active: 0,
+          limit: 0,
+          requestsThisSecond: 0,
+          rateLimit: 0
+        },
+        providers: []
+      };
+    }
+  };
 }
 
 function header(request: IncomingMessage, name: string): string | undefined {

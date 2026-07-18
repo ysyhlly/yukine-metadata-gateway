@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { DashboardMetrics } from "../src/node/dashboard-metrics.js";
 import { DashboardStore } from "../src/node/dashboard-store.js";
@@ -48,7 +49,11 @@ test("dashboard setup, login, metrics snapshot and logout are protected", async 
   assert.equal(setupPage.status, 200);
   assert.equal(setupPage.headers.get("cache-control"), "no-store");
   assert.match(setupPage.headers.get("content-security-policy") || "", /script-src 'nonce-/);
-  assert.match(await setupPage.text(), /history\.replaceState/);
+  const setupHtml = await setupPage.text();
+  assert.match(setupHtml, /history\.replaceState/);
+  assert.match(setupHtml, /id="language"/);
+  assert.match(setupHtml, /yukine-admin-language/);
+  assert.match(setupHtml, /Create the first administrator/);
 
   const oversized = await fetch(`${origin}/admin/api/setup`, {
     method: "POST",
@@ -134,7 +139,15 @@ test("dashboard setup, login, metrics snapshot and logout are protected", async 
     42,
     {
       cacheHit: true,
-      upstream: [{ host: "musicbrainz.org", status: 200 }]
+      upstream: [{
+        provider: "musicbrainz",
+        host: "musicbrainz.org",
+        status: 200,
+        outcome: "success",
+        durationMs: 38,
+        cacheState: "fresh",
+        cacheLayer: "sqlite"
+      }]
     }
   );
 
@@ -146,13 +159,63 @@ test("dashboard setup, login, metrics snapshot and logout are protected", async 
   });
   assert.equal(snapshotResponse.status, 200);
   const snapshot = await snapshotResponse.json() as {
+    schemaVersion: number;
     csrfToken: string;
-    summary: { requests: number; cacheHitRate: number };
+    summary: {
+      requests: number;
+      cacheHitRate: number;
+      latencyP95Ms: number;
+    };
+    performance: { trend: Array<{ latencyP95Ms: number }> };
+    cache: {
+      metricsKnown: boolean;
+      states: Record<string, number>;
+      layers: Record<string, number>;
+    };
+    providers: Array<{
+      provider: string;
+      outcomes: Record<string, number>;
+      cacheStates: Record<string, number>;
+      health: { state: string; limit: number };
+    }>;
+    instances: Array<{
+      instanceId: string;
+      online: boolean;
+      cache: { l2: { layer: string } };
+    }>;
     routes: Array<{ route: string }>;
   };
+  assert.equal(snapshot.schemaVersion, 2);
   assert.equal(snapshot.summary.requests, 1);
   assert.equal(snapshot.summary.cacheHitRate, 1);
+  assert.equal(snapshot.summary.latencyP95Ms, 50);
   assert.equal(snapshot.routes[0]?.route, "/v1/recordings/search");
+  assert.equal(snapshot.performance.trend[0]?.latencyP95Ms, 50);
+  assert.equal(snapshot.cache.metricsKnown, true);
+  assert.equal(snapshot.cache.states.fresh, 1);
+  assert.equal(snapshot.cache.layers.sqlite, 1);
+  assert.equal(snapshot.providers[0]?.provider, "musicbrainz");
+  assert.equal(snapshot.providers[0]?.outcomes.success, 1);
+  assert.equal(snapshot.providers[0]?.cacheStates.fresh, 1);
+  assert.equal(snapshot.providers[0]?.health.limit, 1);
+  assert.equal(snapshot.instances[0]?.online, true);
+  assert.equal(snapshot.instances[0]?.cache.l2.layer, "sqlite");
+
+  const dashboardPage = await fetch(`${origin}/admin`, {
+    headers: { Cookie: cookie }
+  });
+  assert.equal(dashboardPage.status, 200);
+  const dashboardHtml = await dashboardPage.text();
+  assert.match(dashboardHtml, /role="tablist"/);
+  assert.match(dashboardHtml, /id="panel-performance"/);
+  assert.match(dashboardHtml, /id="panel-providers"/);
+  assert.match(dashboardHtml, /id="panel-runtime"/);
+  assert.match(dashboardHtml, /<svg id="trend-chart"/);
+  assert.match(dashboardHtml, /共享缓存已连接，数量未知/);
+  assert.match(dashboardHtml, /id="language"/);
+  assert.match(dashboardHtml, /Connected · refreshes every 5s/);
+  assert.match(dashboardHtml, /yukine-admin-language/);
+  assert.doesNotMatch(dashboardHtml, /1 人在看/);
 
   const badLogout = await fetch(`${origin}/admin/api/logout`, {
     method: "POST",
@@ -223,8 +286,74 @@ test("dashboard metrics survive reopening the same SQLite file", async (context)
   assert.equal(snapshot.summary.requests, 1);
   assert.equal(snapshot.routes[0]?.route, "/v1/lyrics/search");
   assert.equal(snapshot.upstream[0]?.host, "lrclib.net");
+  assert.equal(snapshot.cache.metricsKnown, false);
+  assert.equal(snapshot.cache.freshRate, null);
+  assert.equal(snapshot.cache.states.unknown, 1);
   await reopenedMetrics.close();
   reopenedStore.close();
+});
+
+test("SQLite dashboard migration is additive, idempotent and preserves history", async (context) => {
+  const directory = await temporaryDirectory();
+  context.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+  const path = join(directory, "dashboard.sqlite");
+  const options = {
+    path,
+    sessionIdleMs: 30 * 60_000,
+    sessionAbsoluteMs: 8 * 60 * 60_000,
+    metricsRetentionMs: 30 * 24 * 60 * 60_000
+  };
+  const initial = new DashboardStore(options);
+  const bucketStartMs = Math.floor(Date.now() / 60_000) * 60_000;
+  await initial.writeMetrics([{
+    bucketStartMs,
+    route: "/v1/recordings/search",
+    status: 200,
+    requests: 3,
+    cacheHits: 2,
+    upstreamRequests: 3,
+    upstreamAttempts: 3,
+    durationSumMs: 120,
+    durationMaxMs: 60,
+    latencyBuckets: [0, 0, 1, 3, 3, 3, 3, 3, 3, 3, 0]
+  }], []);
+  initial.close();
+
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    DROP TABLE dashboard_provider_minute;
+    DROP TABLE dashboard_runtime_sample;
+    DROP TABLE dashboard_provider_health_sample;
+    PRAGMA user_version = 1;
+  `);
+  legacy.close();
+
+  const migrated = new DashboardStore(options);
+  assert.equal((await migrated.readRequestMetrics(0))[0]?.requests, 3);
+  migrated.close();
+
+  const verification = new DatabaseSync(path);
+  const version = verification.prepare("PRAGMA user_version").get() as {
+    user_version: number;
+  };
+  const newTables = verification.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table' AND name LIKE 'dashboard_%_sample'
+    ORDER BY name
+  `).all() as Array<{ name: string }>;
+  verification.close();
+  assert.equal(version.user_version, 2);
+  assert.deepEqual(newTables.map((row) => row.name), [
+    "dashboard_provider_health_sample",
+    "dashboard_runtime_sample"
+  ]);
+
+  const repeated = new DashboardStore(options);
+  assert.equal((await repeated.readRequestMetrics(0))[0]?.requests, 3);
+  repeated.close();
 });
 
 function baseConfig(directory: string) {

@@ -2,9 +2,13 @@ import { Pool, type PoolClient } from "pg";
 import type {
   AdminRecord,
   NewSession,
+  ProviderHealthSampleRow,
+  ProviderMetricRow,
   RequestMetricRow,
+  RuntimeSampleRow,
   SessionRecord,
   StoredRequestMetric,
+  StoredProviderMetric,
   StoredUpstreamSummary,
   UpstreamMetricRow
 } from "./dashboard-store.js";
@@ -203,6 +207,153 @@ export class PostgresDashboardStore implements DashboardStoreAdapter {
     }
   }
 
+  async writeProviderMetrics(rows: ProviderMetricRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const row of rows) {
+        const values = [
+          row.bucketStartMs,
+          row.route,
+          row.provider,
+          row.host,
+          row.outcome,
+          row.cacheState,
+          row.cacheLayer,
+          row.attempts,
+          row.durationSumMs,
+          row.durationMaxMs,
+          ...row.latencyBuckets
+        ];
+        await client.query(`
+          INSERT INTO dashboard_provider_minute(
+            bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer,
+            attempts, duration_sum_ms, duration_max_ms, ${LATENCY_COLUMNS.join(", ")}
+          ) VALUES (${values.map((_, index) => `$${index + 1}`).join(", ")})
+          ON CONFLICT(
+            bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer
+          ) DO UPDATE SET
+            attempts = dashboard_provider_minute.attempts + excluded.attempts,
+            duration_sum_ms = dashboard_provider_minute.duration_sum_ms
+              + excluded.duration_sum_ms,
+            duration_max_ms = GREATEST(
+              dashboard_provider_minute.duration_max_ms,
+              excluded.duration_max_ms
+            ),
+            ${LATENCY_COLUMNS.map((column) =>
+              `${column} = dashboard_provider_minute.${column} + excluded.${column}`
+            ).join(",\n            ")}
+        `, values);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async writeRuntimeSamples(
+    runtime: RuntimeSampleRow,
+    providers: ProviderHealthSampleRow[]
+  ): Promise<void> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`
+        INSERT INTO dashboard_runtime_sample(
+          bucket_start_ms, instance_id, heartbeat_at, version, revision, runtime,
+          state_backend, ready, started_at, uptime_seconds, l1_entries, l1_max_entries,
+          l2_layer, l2_entries, l2_max_entries, l2_connected, singleflight_flights,
+          singleflight_waiters, ingress_active, ingress_limit, requests_this_second,
+          rate_limit
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+          $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+        )
+        ON CONFLICT(bucket_start_ms, instance_id) DO UPDATE SET
+          heartbeat_at = excluded.heartbeat_at,
+          version = excluded.version,
+          revision = excluded.revision,
+          runtime = excluded.runtime,
+          state_backend = excluded.state_backend,
+          ready = excluded.ready,
+          started_at = excluded.started_at,
+          uptime_seconds = excluded.uptime_seconds,
+          l1_entries = excluded.l1_entries,
+          l1_max_entries = excluded.l1_max_entries,
+          l2_layer = excluded.l2_layer,
+          l2_entries = excluded.l2_entries,
+          l2_max_entries = excluded.l2_max_entries,
+          l2_connected = excluded.l2_connected,
+          singleflight_flights = excluded.singleflight_flights,
+          singleflight_waiters = excluded.singleflight_waiters,
+          ingress_active = excluded.ingress_active,
+          ingress_limit = excluded.ingress_limit,
+          requests_this_second = excluded.requests_this_second,
+          rate_limit = excluded.rate_limit
+      `, [
+        runtime.bucketStartMs,
+        runtime.instanceId,
+        runtime.heartbeatAt,
+        runtime.version,
+        runtime.revision,
+        runtime.runtime,
+        runtime.stateBackend,
+        runtime.ready,
+        runtime.startedAt,
+        runtime.uptimeSeconds,
+        runtime.l1Entries,
+        runtime.l1MaxEntries,
+        runtime.l2Layer,
+        runtime.l2Entries,
+        runtime.l2MaxEntries,
+        runtime.l2Connected,
+        runtime.singleflightFlights,
+        runtime.singleflightWaiters,
+        runtime.ingressActive,
+        runtime.ingressLimit,
+        runtime.requestsThisSecond,
+        runtime.rateLimit
+      ]);
+      for (const row of providers) {
+        await client.query(`
+          INSERT INTO dashboard_provider_health_sample(
+            bucket_start_ms, instance_id, provider, state, recent_failures,
+            opened_at, active, queued, concurrency_limit
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT(bucket_start_ms, instance_id, provider) DO UPDATE SET
+            state = excluded.state,
+            recent_failures = excluded.recent_failures,
+            opened_at = excluded.opened_at,
+            active = excluded.active,
+            queued = excluded.queued,
+            concurrency_limit = excluded.concurrency_limit
+        `, [
+          row.bucketStartMs,
+          row.instanceId,
+          row.provider,
+          row.state,
+          row.recentFailures,
+          row.openedAt,
+          row.active,
+          row.queued,
+          row.limit
+        ]);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async readRequestMetrics(since: number): Promise<StoredRequestMetric[]> {
     await this.initialize();
     const result = await this.pool.query<Record<string, string | number>>(`
@@ -248,6 +399,65 @@ export class PostgresDashboardStore implements DashboardStoreAdapter {
     }));
   }
 
+  async readProviderMetrics(since: number): Promise<StoredProviderMetric[]> {
+    await this.initialize();
+    const result = await this.pool.query<Record<string, string | number>>(`
+      SELECT
+        bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer,
+        attempts, duration_sum_ms, duration_max_ms, ${LATENCY_COLUMNS.join(", ")}
+      FROM dashboard_provider_minute
+      WHERE bucket_start_ms >= $1
+      ORDER BY bucket_start_ms ASC, provider ASC, host ASC
+    `, [since]);
+    return result.rows.map((row) => ({
+      bucketStartMs: Number(row.bucket_start_ms),
+      route: String(row.route),
+      provider: String(row.provider),
+      host: String(row.host),
+      outcome: String(row.outcome) as ProviderMetricRow["outcome"],
+      cacheState: String(row.cache_state) as ProviderMetricRow["cacheState"],
+      cacheLayer: String(row.cache_layer) as ProviderMetricRow["cacheLayer"],
+      attempts: Number(row.attempts),
+      durationSumMs: Number(row.duration_sum_ms),
+      durationMaxMs: Number(row.duration_max_ms),
+      latencyBuckets: LATENCY_COLUMNS.map((column) => Number(row[column]))
+    }));
+  }
+
+  async readRuntimeSamples(since: number): Promise<RuntimeSampleRow[]> {
+    await this.initialize();
+    const result = await this.pool.query<Record<string, unknown>>(`
+      SELECT *
+      FROM dashboard_runtime_sample
+      WHERE bucket_start_ms >= $1
+      ORDER BY bucket_start_ms ASC, instance_id ASC
+    `, [since]);
+    return result.rows.map(runtimeSampleFromRow);
+  }
+
+  async readProviderHealth(since: number): Promise<ProviderHealthSampleRow[]> {
+    await this.initialize();
+    const result = await this.pool.query<Record<string, unknown>>(`
+      SELECT
+        bucket_start_ms, instance_id, provider, state, recent_failures,
+        opened_at, active, queued, concurrency_limit
+      FROM dashboard_provider_health_sample
+      WHERE bucket_start_ms >= $1
+      ORDER BY bucket_start_ms ASC, instance_id ASC, provider ASC
+    `, [since]);
+    return result.rows.map((row) => ({
+      bucketStartMs: Number(row.bucket_start_ms),
+      instanceId: String(row.instance_id),
+      provider: String(row.provider),
+      state: String(row.state) as ProviderHealthSampleRow["state"],
+      recentFailures: Number(row.recent_failures),
+      openedAt: row.opened_at === null ? null : Number(row.opened_at),
+      active: Number(row.active),
+      queued: Number(row.queued),
+      limit: Number(row.concurrency_limit)
+    }));
+  }
+
   async cleanup(now: number): Promise<void> {
     await this.initialize();
     const cutoff = now - this.options.metricsRetentionMs;
@@ -257,6 +467,18 @@ export class PostgresDashboardStore implements DashboardStoreAdapter {
     );
     await this.pool.query(
       "DELETE FROM dashboard_upstream_minute WHERE bucket_start_ms < $1",
+      [cutoff]
+    );
+    await this.pool.query(
+      "DELETE FROM dashboard_provider_minute WHERE bucket_start_ms < $1",
+      [cutoff]
+    );
+    await this.pool.query(
+      "DELETE FROM dashboard_runtime_sample WHERE bucket_start_ms < $1",
+      [cutoff]
+    );
+    await this.pool.query(
+      "DELETE FROM dashboard_provider_health_sample WHERE bucket_start_ms < $1",
       [cutoff]
     );
     await this.pool.query(`
@@ -331,9 +553,70 @@ export class PostgresDashboardStore implements DashboardStoreAdapter {
           attempts BIGINT NOT NULL,
           PRIMARY KEY(bucket_start_ms, route, host, outcome)
         );
+        CREATE TABLE IF NOT EXISTS dashboard_provider_minute (
+          bucket_start_ms BIGINT NOT NULL,
+          route TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          host TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          cache_state TEXT NOT NULL,
+          cache_layer TEXT NOT NULL,
+          attempts BIGINT NOT NULL,
+          duration_sum_ms BIGINT NOT NULL,
+          duration_max_ms BIGINT NOT NULL,
+          ${LATENCY_COLUMNS.map((column) => `${column} BIGINT NOT NULL`).join(",\n          ")},
+          PRIMARY KEY(
+            bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer
+          )
+        );
+        CREATE INDEX IF NOT EXISTS dashboard_provider_minute_time
+          ON dashboard_provider_minute(bucket_start_ms);
+        CREATE TABLE IF NOT EXISTS dashboard_runtime_sample (
+          bucket_start_ms BIGINT NOT NULL,
+          instance_id TEXT NOT NULL,
+          heartbeat_at BIGINT NOT NULL,
+          version TEXT NOT NULL,
+          revision TEXT NOT NULL,
+          runtime TEXT NOT NULL,
+          state_backend TEXT NOT NULL,
+          ready BOOLEAN NOT NULL,
+          started_at BIGINT NOT NULL,
+          uptime_seconds BIGINT NOT NULL,
+          l1_entries BIGINT NOT NULL,
+          l1_max_entries BIGINT NOT NULL,
+          l2_layer TEXT NOT NULL,
+          l2_entries BIGINT,
+          l2_max_entries BIGINT,
+          l2_connected BOOLEAN NOT NULL,
+          singleflight_flights BIGINT NOT NULL,
+          singleflight_waiters BIGINT NOT NULL,
+          ingress_active BIGINT NOT NULL,
+          ingress_limit BIGINT NOT NULL,
+          requests_this_second BIGINT NOT NULL,
+          rate_limit BIGINT NOT NULL,
+          PRIMARY KEY(bucket_start_ms, instance_id)
+        );
+        CREATE INDEX IF NOT EXISTS dashboard_runtime_sample_time
+          ON dashboard_runtime_sample(bucket_start_ms);
+        CREATE TABLE IF NOT EXISTS dashboard_provider_health_sample (
+          bucket_start_ms BIGINT NOT NULL,
+          instance_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          state TEXT NOT NULL,
+          recent_failures BIGINT NOT NULL,
+          opened_at BIGINT,
+          active BIGINT NOT NULL,
+          queued BIGINT NOT NULL,
+          concurrency_limit BIGINT NOT NULL,
+          PRIMARY KEY(bucket_start_ms, instance_id, provider)
+        );
+        CREATE INDEX IF NOT EXISTS dashboard_provider_health_sample_time
+          ON dashboard_provider_health_sample(bucket_start_ms);
+      `);
+      await client.query(`
         INSERT INTO gateway_schema_migrations(version, applied_at)
-        VALUES (1, $1)
-        ON CONFLICT(version) DO NOTHING;
+        VALUES (1, $1), (2, $1)
+        ON CONFLICT(version) DO NOTHING
       `, [Date.now()]);
       await client.query("COMMIT");
     } catch (error) {
@@ -382,6 +665,33 @@ export class PostgresDashboardStore implements DashboardStoreAdapter {
         ).join(",\n        ")}
     `, values);
   }
+}
+
+function runtimeSampleFromRow(row: Record<string, unknown>): RuntimeSampleRow {
+  return {
+    bucketStartMs: Number(row.bucket_start_ms),
+    instanceId: String(row.instance_id),
+    heartbeatAt: Number(row.heartbeat_at),
+    version: String(row.version),
+    revision: String(row.revision),
+    runtime: "node",
+    stateBackend: String(row.state_backend) as RuntimeSampleRow["stateBackend"],
+    ready: Boolean(row.ready),
+    startedAt: Number(row.started_at),
+    uptimeSeconds: Number(row.uptime_seconds),
+    l1Entries: Number(row.l1_entries),
+    l1MaxEntries: Number(row.l1_max_entries),
+    l2Layer: String(row.l2_layer) as RuntimeSampleRow["l2Layer"],
+    l2Entries: row.l2_entries === null ? null : Number(row.l2_entries),
+    l2MaxEntries: row.l2_max_entries === null ? null : Number(row.l2_max_entries),
+    l2Connected: Boolean(row.l2_connected),
+    singleflightFlights: Number(row.singleflight_flights),
+    singleflightWaiters: Number(row.singleflight_waiters),
+    ingressActive: Number(row.ingress_active),
+    ingressLimit: Number(row.ingress_limit),
+    requestsThisSecond: Number(row.requests_this_second),
+    rateLimit: Number(row.rate_limit)
+  };
 }
 
 function safeAdd(value: number, delta: number): number {

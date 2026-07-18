@@ -1,6 +1,11 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type {
+  CacheLayer,
+  CacheState,
+  UpstreamOutcome
+} from "../types.js";
 
 export interface DashboardStoreOptions {
   path: string;
@@ -58,6 +63,59 @@ export interface StoredUpstreamSummary {
   attempts: number;
 }
 
+export interface ProviderMetricRow {
+  bucketStartMs: number;
+  route: string;
+  provider: string;
+  host: string;
+  outcome: UpstreamOutcome | "unknown";
+  cacheState: CacheState | "unknown";
+  cacheLayer: CacheLayer | "unknown";
+  attempts: number;
+  durationSumMs: number;
+  durationMaxMs: number;
+  latencyBuckets: number[];
+}
+
+export interface StoredProviderMetric extends ProviderMetricRow {}
+
+export interface RuntimeSampleRow {
+  bucketStartMs: number;
+  instanceId: string;
+  heartbeatAt: number;
+  version: string;
+  revision: string;
+  runtime: "node";
+  stateBackend: "sqlite" | "external";
+  ready: boolean;
+  startedAt: number;
+  uptimeSeconds: number;
+  l1Entries: number;
+  l1MaxEntries: number;
+  l2Layer: "sqlite" | "redis";
+  l2Entries: number | null;
+  l2MaxEntries: number | null;
+  l2Connected: boolean;
+  singleflightFlights: number;
+  singleflightWaiters: number;
+  ingressActive: number;
+  ingressLimit: number;
+  requestsThisSecond: number;
+  rateLimit: number;
+}
+
+export interface ProviderHealthSampleRow {
+  bucketStartMs: number;
+  instanceId: string;
+  provider: string;
+  state: "closed" | "open" | "half_open";
+  recentFailures: number;
+  openedAt: number | null;
+  active: number;
+  queued: number;
+  limit: number;
+}
+
 const LATENCY_COLUMNS = [
   "lat_le_10",
   "lat_le_25",
@@ -86,6 +144,7 @@ export class DashboardStore {
         PRAGMA synchronous = NORMAL;
         PRAGMA busy_timeout = 5000;
         PRAGMA foreign_keys = ON;
+        BEGIN IMMEDIATE;
 
         CREATE TABLE IF NOT EXISTS dashboard_admin (
           singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
@@ -145,6 +204,71 @@ export class DashboardStore {
         ) STRICT;
         CREATE INDEX IF NOT EXISTS dashboard_upstream_minute_time
           ON dashboard_upstream_minute(bucket_start_ms);
+
+        CREATE TABLE IF NOT EXISTS dashboard_provider_minute (
+          bucket_start_ms INTEGER NOT NULL,
+          route TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          host TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          cache_state TEXT NOT NULL,
+          cache_layer TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          duration_sum_ms INTEGER NOT NULL DEFAULT 0,
+          duration_max_ms INTEGER NOT NULL DEFAULT 0,
+          ${LATENCY_COLUMNS.map((column) => `${column} INTEGER NOT NULL DEFAULT 0`).join(",\n          ")},
+          PRIMARY KEY(
+            bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer
+          )
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS dashboard_provider_minute_time
+          ON dashboard_provider_minute(bucket_start_ms);
+
+        CREATE TABLE IF NOT EXISTS dashboard_runtime_sample (
+          bucket_start_ms INTEGER NOT NULL,
+          instance_id TEXT NOT NULL,
+          heartbeat_at INTEGER NOT NULL,
+          version TEXT NOT NULL,
+          revision TEXT NOT NULL,
+          runtime TEXT NOT NULL,
+          state_backend TEXT NOT NULL,
+          ready INTEGER NOT NULL,
+          started_at INTEGER NOT NULL,
+          uptime_seconds INTEGER NOT NULL,
+          l1_entries INTEGER NOT NULL,
+          l1_max_entries INTEGER NOT NULL,
+          l2_layer TEXT NOT NULL,
+          l2_entries INTEGER,
+          l2_max_entries INTEGER,
+          l2_connected INTEGER NOT NULL,
+          singleflight_flights INTEGER NOT NULL,
+          singleflight_waiters INTEGER NOT NULL,
+          ingress_active INTEGER NOT NULL,
+          ingress_limit INTEGER NOT NULL,
+          requests_this_second INTEGER NOT NULL,
+          rate_limit INTEGER NOT NULL,
+          PRIMARY KEY(bucket_start_ms, instance_id)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS dashboard_runtime_sample_time
+          ON dashboard_runtime_sample(bucket_start_ms);
+
+        CREATE TABLE IF NOT EXISTS dashboard_provider_health_sample (
+          bucket_start_ms INTEGER NOT NULL,
+          instance_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          state TEXT NOT NULL,
+          recent_failures INTEGER NOT NULL,
+          opened_at INTEGER,
+          active INTEGER NOT NULL,
+          queued INTEGER NOT NULL,
+          concurrency_limit INTEGER NOT NULL,
+          PRIMARY KEY(bucket_start_ms, instance_id, provider)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS dashboard_provider_health_sample_time
+          ON dashboard_provider_health_sample(bucket_start_ms);
+
+        PRAGMA user_version = 2;
+        COMMIT;
       `);
       securePermissions(options.path, 0o600);
       securePermissions(`${options.path}-wal`, 0o600);
@@ -152,6 +276,9 @@ export class DashboardStore {
       this.database = database;
       this.cleanup(Date.now());
     } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
       database.close();
       throw error;
     }
@@ -362,6 +489,145 @@ export class DashboardStore {
     }
   }
 
+  writeProviderMetrics(rows: ProviderMetricRow[]): void {
+    if (rows.length === 0) return;
+    const statement = this.database.prepare(`
+      INSERT INTO dashboard_provider_minute(
+        bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer,
+        attempts, duration_sum_ms, duration_max_ms, ${LATENCY_COLUMNS.join(", ")}
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ${LATENCY_COLUMNS.map(() => "?").join(", ")}
+      )
+      ON CONFLICT(
+        bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer
+      ) DO UPDATE SET
+        attempts = attempts + excluded.attempts,
+        duration_sum_ms = duration_sum_ms + excluded.duration_sum_ms,
+        duration_max_ms = MAX(duration_max_ms, excluded.duration_max_ms),
+        ${LATENCY_COLUMNS.map(
+          (column) => `${column} = ${column} + excluded.${column}`
+        ).join(",\n        ")}
+    `);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        statement.run(
+          row.bucketStartMs,
+          row.route,
+          row.provider,
+          row.host,
+          row.outcome,
+          row.cacheState,
+          row.cacheLayer,
+          row.attempts,
+          row.durationSumMs,
+          row.durationMaxMs,
+          ...row.latencyBuckets
+        );
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  writeRuntimeSamples(
+    runtime: RuntimeSampleRow,
+    providers: ProviderHealthSampleRow[]
+  ): void {
+    const runtimeStatement = this.database.prepare(`
+      INSERT INTO dashboard_runtime_sample(
+        bucket_start_ms, instance_id, heartbeat_at, version, revision, runtime,
+        state_backend, ready, started_at, uptime_seconds, l1_entries, l1_max_entries,
+        l2_layer, l2_entries, l2_max_entries, l2_connected, singleflight_flights,
+        singleflight_waiters, ingress_active, ingress_limit, requests_this_second,
+        rate_limit
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )
+      ON CONFLICT(bucket_start_ms, instance_id) DO UPDATE SET
+        heartbeat_at = excluded.heartbeat_at,
+        version = excluded.version,
+        revision = excluded.revision,
+        runtime = excluded.runtime,
+        state_backend = excluded.state_backend,
+        ready = excluded.ready,
+        started_at = excluded.started_at,
+        uptime_seconds = excluded.uptime_seconds,
+        l1_entries = excluded.l1_entries,
+        l1_max_entries = excluded.l1_max_entries,
+        l2_layer = excluded.l2_layer,
+        l2_entries = excluded.l2_entries,
+        l2_max_entries = excluded.l2_max_entries,
+        l2_connected = excluded.l2_connected,
+        singleflight_flights = excluded.singleflight_flights,
+        singleflight_waiters = excluded.singleflight_waiters,
+        ingress_active = excluded.ingress_active,
+        ingress_limit = excluded.ingress_limit,
+        requests_this_second = excluded.requests_this_second,
+        rate_limit = excluded.rate_limit
+    `);
+    const providerStatement = this.database.prepare(`
+      INSERT INTO dashboard_provider_health_sample(
+        bucket_start_ms, instance_id, provider, state, recent_failures,
+        opened_at, active, queued, concurrency_limit
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(bucket_start_ms, instance_id, provider) DO UPDATE SET
+        state = excluded.state,
+        recent_failures = excluded.recent_failures,
+        opened_at = excluded.opened_at,
+        active = excluded.active,
+        queued = excluded.queued,
+        concurrency_limit = excluded.concurrency_limit
+    `);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      runtimeStatement.run(
+        runtime.bucketStartMs,
+        runtime.instanceId,
+        runtime.heartbeatAt,
+        runtime.version,
+        runtime.revision,
+        runtime.runtime,
+        runtime.stateBackend,
+        runtime.ready ? 1 : 0,
+        runtime.startedAt,
+        runtime.uptimeSeconds,
+        runtime.l1Entries,
+        runtime.l1MaxEntries,
+        runtime.l2Layer,
+        runtime.l2Entries,
+        runtime.l2MaxEntries,
+        runtime.l2Connected ? 1 : 0,
+        runtime.singleflightFlights,
+        runtime.singleflightWaiters,
+        runtime.ingressActive,
+        runtime.ingressLimit,
+        runtime.requestsThisSecond,
+        runtime.rateLimit
+      );
+      for (const row of providers) {
+        providerStatement.run(
+          row.bucketStartMs,
+          row.instanceId,
+          row.provider,
+          row.state,
+          row.recentFailures,
+          row.openedAt,
+          row.active,
+          row.queued,
+          row.limit
+        );
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   readRequestMetrics(since: number): StoredRequestMetric[] {
     const rows = this.database.prepare(`
       SELECT
@@ -412,6 +678,62 @@ export class DashboardStore {
     }));
   }
 
+  readProviderMetrics(since: number): StoredProviderMetric[] {
+    const rows = this.database.prepare(`
+      SELECT
+        bucket_start_ms, route, provider, host, outcome, cache_state, cache_layer,
+        attempts, duration_sum_ms, duration_max_ms, ${LATENCY_COLUMNS.join(", ")}
+      FROM dashboard_provider_minute
+      WHERE bucket_start_ms >= ?
+      ORDER BY bucket_start_ms ASC, provider ASC, host ASC
+    `).all(since) as Array<Record<string, string | number>>;
+    return rows.map((row) => ({
+      bucketStartMs: Number(row.bucket_start_ms),
+      route: String(row.route),
+      provider: String(row.provider),
+      host: String(row.host),
+      outcome: String(row.outcome) as ProviderMetricRow["outcome"],
+      cacheState: String(row.cache_state) as ProviderMetricRow["cacheState"],
+      cacheLayer: String(row.cache_layer) as ProviderMetricRow["cacheLayer"],
+      attempts: Number(row.attempts),
+      durationSumMs: Number(row.duration_sum_ms),
+      durationMaxMs: Number(row.duration_max_ms),
+      latencyBuckets: LATENCY_COLUMNS.map((column) => Number(row[column]))
+    }));
+  }
+
+  readRuntimeSamples(since: number): RuntimeSampleRow[] {
+    const rows = this.database.prepare(`
+      SELECT *
+      FROM dashboard_runtime_sample
+      WHERE bucket_start_ms >= ?
+      ORDER BY bucket_start_ms ASC, instance_id ASC
+    `).all(since) as Array<Record<string, string | number | null>>;
+    return rows.map(runtimeSampleFromRow);
+  }
+
+  readProviderHealth(since: number): ProviderHealthSampleRow[] {
+    const rows = this.database.prepare(`
+      SELECT
+        bucket_start_ms, instance_id, provider, state, recent_failures,
+        opened_at, active, queued, concurrency_limit
+      FROM dashboard_provider_health_sample
+      WHERE bucket_start_ms >= ?
+      ORDER BY bucket_start_ms ASC, instance_id ASC, provider ASC
+    `).all(since) as Array<Record<string, string | number | null>>;
+    return rows.map((row) => ({
+      bucketStartMs: Number(row.bucket_start_ms),
+      instanceId: String(row.instance_id),
+      provider: String(row.provider),
+      state: String(row.state) as ProviderHealthSampleRow["state"],
+      recentFailures: Number(row.recent_failures),
+      openedAt: row.opened_at === null ? null : Number(row.opened_at),
+      active: Number(row.active),
+      queued: Number(row.queued),
+      limit: Number(row.concurrency_limit)
+    }));
+  }
+
   cleanup(now: number): void {
     const cutoff = now - this.options.metricsRetentionMs;
     this.database.prepare(
@@ -419,6 +741,15 @@ export class DashboardStore {
     ).run(cutoff);
     this.database.prepare(
       "DELETE FROM dashboard_upstream_minute WHERE bucket_start_ms < ?"
+    ).run(cutoff);
+    this.database.prepare(
+      "DELETE FROM dashboard_provider_minute WHERE bucket_start_ms < ?"
+    ).run(cutoff);
+    this.database.prepare(
+      "DELETE FROM dashboard_runtime_sample WHERE bucket_start_ms < ?"
+    ).run(cutoff);
+    this.database.prepare(
+      "DELETE FROM dashboard_provider_health_sample WHERE bucket_start_ms < ?"
     ).run(cutoff);
     this.database.prepare(`
       DELETE FROM dashboard_sessions
@@ -444,6 +775,35 @@ function securePermissions(path: string, mode: number): void {
       throw error;
     }
   }
+}
+
+function runtimeSampleFromRow(
+  row: Record<string, string | number | null>
+): RuntimeSampleRow {
+  return {
+    bucketStartMs: Number(row.bucket_start_ms),
+    instanceId: String(row.instance_id),
+    heartbeatAt: Number(row.heartbeat_at),
+    version: String(row.version),
+    revision: String(row.revision),
+    runtime: "node",
+    stateBackend: String(row.state_backend) as RuntimeSampleRow["stateBackend"],
+    ready: Boolean(row.ready),
+    startedAt: Number(row.started_at),
+    uptimeSeconds: Number(row.uptime_seconds),
+    l1Entries: Number(row.l1_entries),
+    l1MaxEntries: Number(row.l1_max_entries),
+    l2Layer: String(row.l2_layer) as RuntimeSampleRow["l2Layer"],
+    l2Entries: row.l2_entries === null ? null : Number(row.l2_entries),
+    l2MaxEntries: row.l2_max_entries === null ? null : Number(row.l2_max_entries),
+    l2Connected: Boolean(row.l2_connected),
+    singleflightFlights: Number(row.singleflight_flights),
+    singleflightWaiters: Number(row.singleflight_waiters),
+    ingressActive: Number(row.ingress_active),
+    ingressLimit: Number(row.ingress_limit),
+    requestsThisSecond: Number(row.requests_this_second),
+    rateLimit: Number(row.rate_limit)
+  };
 }
 
 function safeAdd(value: number, delta: number): number {

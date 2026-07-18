@@ -49,6 +49,7 @@ export class DefaultProviderManager implements ProviderManagerContract {
         provider: providerName,
         cacheHit: false,
         cacheState: "miss",
+        cacheLayer: "none",
         outcome: "http"
       };
     }
@@ -100,7 +101,8 @@ export class DefaultProviderManager implements ProviderManagerContract {
       provider,
       durationMs: response.durationMs,
       outcome: response.outcome,
-      cacheState: response.cacheState
+      cacheState: response.cacheState,
+      cacheLayer: response.cacheLayer
     };
     context.trace.upstream.push(attempt);
     context.telemetry?.recordProviderAttempt(attempt);

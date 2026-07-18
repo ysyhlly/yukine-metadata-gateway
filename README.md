@@ -48,7 +48,7 @@ HOST=127.0.0.1 PORT=8787 CACHE_DB_PATH=./data/cache.sqlite npm start
 
 ## 可视化监控面板
 
-Node/Docker 运行时提供 `/admin` 监控面板；Cloudflare Worker 不包含该入口。面板统计 `/v1/*` 与 `/v2/*` 业务请求的请求量、可用率、端到端延迟、缓存命中率、状态码、路由和上游主机状态，排除健康检查与面板自身流量。SQLite 模式把分钟指标保存在独立 SQLite 数据库；external 模式使用 PostgreSQL，默认保留 30 天。
+Node/Docker 运行时提供 `/admin` 监控面板；Cloudflare Worker 不包含该入口。面板分为概览、性能、来源和运行时四个视图，内置中文/English 切换并在当前浏览器中记住选择；统计 `/v1/*` 与 `/v2/*` 业务请求的请求量、RPS、可用率、延迟分位数、缓存 fresh/stale/miss、Provider 结果与熔断、SingleFlight 以及实例心跳，排除健康检查与面板自身流量。SQLite 模式把分钟指标保存在独立 SQLite 数据库；external 模式使用 PostgreSQL 汇总多个实例，默认保留 30 天。旧历史没有的新维度显示为 `unknown`，不会回填虚假零值。
 
 首次启用时必须提供至少 32 个字符的一次性引导令牌，否则新数据库会拒绝启动：
 
@@ -103,6 +103,9 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `MAX_REQUESTS_PER_SECOND`（默认 500；Node 每秒请求达到上限后返回 `429 server_rate_limited`）
 - `TRUST_PROXY`（直接运行默认 `false`；Compose 在仅由本机反向代理转发时默认 `true`）
 - `APP_USER_AGENT`
+- `INSTANCE_ID`（实例心跳标识，默认使用主机名；多副本部署时应固定且保持唯一）
+- `APP_VERSION`（默认读取当前 package 版本）
+- `APP_REVISION`（镜像或发布 revision，缺失时为 `unknown`）
 - 可选 `ACOUSTID_API_KEY`
 - `STATE_BACKEND=sqlite|external`（默认 `sqlite`）
 - external 模式必需的 `REDIS_URL` 与 `DATABASE_URL`；依赖不可用时 `/ready` 失败，不会回退到 SQLite
@@ -136,7 +139,7 @@ DASHBOARD_DB_PATH='./data/dashboard.sqlite' \
 npm run migrate:external-state
 ```
 
-迁移工具以源数据库内容摘要记录批次，在事务中写入管理员和历史分钟指标；重复执行不会重复导入。完成后将反向代理的 readiness 指向 `/ready`，并确认至少两个副本的共享缓存、登录会话和指标汇总。
+迁移工具以源数据库内容摘要记录批次，在事务中写入管理员、请求、Provider、实例心跳和熔断健康历史；重复执行不会重复导入。完成后将反向代理的 readiness 指向 `/ready`，并确认至少两个副本的共享缓存、登录会话和指标汇总。Redis 不执行昂贵键扫描，因此面板只报告共享缓存连接状态，条目数量显示为未知。
 
 ### 数据卷备份
 

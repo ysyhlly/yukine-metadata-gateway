@@ -13,6 +13,7 @@ import type { UpstreamJsonCache } from "../types.js";
 import { startNodeTelemetry } from "./telemetry.js";
 import type { NodeTelemetryRuntime } from "./telemetry.js";
 import { PostgresReadiness } from "./postgres-readiness.js";
+import type { RuntimeStatsProvider } from "./runtime-stats.js";
 
 export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConfig()) {
   const sqliteCache = config.stateBackend !== "external"
@@ -37,7 +38,8 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     memoryMaxEntries: config.memoryCacheMaxEntries,
     freshMs: config.cacheTtlSeconds * 1_000,
     staleMs: (config.cacheStaleSeconds ?? 86_400) * 1_000,
-    coordinator: redisCache
+    coordinator: redisCache,
+    cacheLayer: config.stateBackend === "external" ? "redis" : "sqlite"
   });
   const telemetry = startNodeTelemetry(
     config.otelEndpoint,
@@ -46,26 +48,65 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
   const postgres = config.stateBackend === "external"
     ? new PostgresReadiness(required(config.databaseUrl, "database_url_required"))
     : undefined;
-  let dashboard: Dashboard | undefined;
-  try {
-    dashboard = config.dashboard
-      ? new Dashboard(
-          config.dashboard,
-          () => sqliteCache?.stats() || transport.stats()
-        )
-      : undefined;
-  } catch (error) {
-    void cache.close();
-    throw error;
-  }
   const concurrency = new RequestConcurrencyLimiter(config.maxConcurrentRequests);
   const requestRate = new RequestRateLimiter(config.maxRequestsPerSecond);
+  const startedAt = Date.now();
+  let dashboard: Dashboard | undefined;
   const ready = async () => {
     const cacheReady = await cache.ready?.() ?? true;
     const postgresReady = await postgres?.ready() ?? true;
     const dashboardReady = await dashboard?.ready() ?? true;
     return cacheReady && postgresReady && dashboardReady;
   };
+  const runtimeStats: RuntimeStatsProvider = {
+    snapshot: async () => {
+      const now = Date.now();
+      const transportStats = transport.runtimeStats();
+      const l2Connected = await cache.ready?.() ?? true;
+      const sqliteStats = sqliteCache?.stats();
+      return {
+        instanceId: config.instanceId || "unknown",
+        version: config.appVersion || "1.0.0",
+        revision: config.appRevision || "unknown",
+        runtime: "node",
+        stateBackend: config.stateBackend === "external" ? "external" : "sqlite",
+        ready: await ready(),
+        heartbeatAt: now,
+        startedAt,
+        uptimeSeconds: Math.max(0, Math.floor((now - startedAt) / 1_000)),
+        cache: {
+          l1: {
+            layer: "memory",
+            entries: transportStats.memory.entries,
+            maxEntries: transportStats.memory.maxEntries,
+            connected: true
+          },
+          l2: {
+            layer: config.stateBackend === "external" ? "redis" : "sqlite",
+            entries: sqliteStats?.entries ?? null,
+            maxEntries: sqliteStats?.maxEntries ?? null,
+            connected: l2Connected
+          }
+        },
+        singleflight: transportStats.singleflight,
+        ingress: {
+          active: concurrency.activeRequests,
+          limit: concurrency.maximum,
+          requestsThisSecond: requestRate.requestsInCurrentWindow,
+          rateLimit: requestRate.maximumPerSecond
+        },
+        providers: transportStats.providers
+      };
+    }
+  };
+  try {
+    dashboard = config.dashboard
+      ? new Dashboard(config.dashboard, runtimeStats)
+      : undefined;
+  } catch (error) {
+    void cache.close();
+    throw error;
+  }
   const server = createServer(
     {
       maxHeaderSize: 64 * 1024,
@@ -104,12 +145,12 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     if (closing) return;
     closing = true;
     server.close(() => {
-      void Promise.all([
-        dashboard?.close(),
-        cache.close(),
-        postgres?.close(),
-        telemetry.shutdown()
-      ]).finally(() => {
+      void (async () => {
+        await dashboard?.close();
+        await cache.close();
+        await postgres?.close();
+        await telemetry.shutdown();
+      })().finally(() => {
         process.exitCode = 0;
       });
     });

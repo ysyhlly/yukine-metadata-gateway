@@ -15,6 +15,7 @@ export function validateUpstream(
     provider: response.provider,
     cacheHit: false,
     cacheState: "miss",
+    cacheLayer: "none",
     durationMs: response.durationMs,
     outcome: "parse"
   };
