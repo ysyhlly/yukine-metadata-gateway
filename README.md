@@ -1,6 +1,6 @@
 # Yukine Metadata Gateway
 
-本仓库同时提供 Cloudflare Worker 和 Node/Docker 两个运行时。两者共享路由、输入校验、MusicBrainz/AcoustID/iTunes/Wikidata/LRCLIB 聚合及响应模型；网关只接收元数据和可选 Chromaprint，不接收原始音频、不代理图片字节，也不提供流媒体播放解析。
+本仓库同时提供 Cloudflare Worker 和 Node/Docker 两个运行时。两者共享路由、输入校验、MusicBrainz/AcoustID/iTunes/Wikidata/网易云/LRCLIB 聚合及响应模型；网关只接收元数据和可选 Chromaprint，不接收原始音频、不代理图片字节，也不提供流媒体播放解析。
 
 ## API
 
@@ -11,9 +11,9 @@
 
 录音接口的 `coverUrl` 只会返回 MusicBrainz 已声明 front artwork 的 Cover Art Archive URL，或 HTTPS `*.mzstatic.com` iTunes 图片。歌词接口接受必填 `title`，以及可选 `artist`、`album`、`durationMs`；无结果返回 `{"lyrics":null}`。
 
-艺人接口的每个 `artists[]` 都包含 `avatarUrl` 和 `description` 字符串。首个匹配结果会通过 MusicBrainz 关联的 Wikidata 实体增强：头像读取 `P18`，介绍优先使用简体中文或中文描述，缺失时回退英文；没有可信内容时相应字段为空字符串。
+艺人接口的每个 `artists[]` 都包含 `avatarUrl` 和 `description` 字符串。首个匹配结果会优先通过 MusicBrainz 关联的 Wikidata 实体增强：头像读取 `P18`，介绍优先使用简体中文或中文描述，缺失时回退英文。头像或介绍仍为空时，网关会匿名查询网易云官方域名，只有精确匹配艺人名称后才逐字段补齐；图片只接受 HTTPS `*.music.126.net`，不会代理图片字节。没有可信内容时相应字段为空字符串。
 
-所有基础查询均失败时返回 `502 upstream_failure`。已知 404、合法空结果和头像、介绍、封面等附加增强失败不会把基础结果升级为 502。
+网易云仅用于艺人头像和介绍的 best-effort 补充，整段补充请求共用 2.5 秒期限；网关不接收或保存网易云 Cookie，也不迁移网易云歌词、播放、歌单或登录接口。所有基础查询均失败时返回 `502 upstream_failure`。已知 404、合法空结果和头像、介绍、封面等附加增强失败不会把基础结果升级为 502。
 
 ## 本地检查
 

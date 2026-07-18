@@ -38,10 +38,18 @@ interface ArtistProfileEnhancement {
   description: string;
 }
 
+interface NeteaseArtistMatch {
+  id: string;
+  avatarUrl: string;
+}
+
 const MB = "https://musicbrainz.org/ws/2/";
 const ITUNES = "https://itunes.apple.com/search";
 const ACOUSTID = "https://api.acoustid.org/v2/lookup";
 const WIKIDATA_API = "https://www.wikidata.org/w/api.php";
+const NETEASE_SEARCH = "https://music.163.com/api/cloudsearch/pc";
+const NETEASE_ARTIST_INTRODUCTION = "https://music.163.com/api/artist/introduction";
+const NETEASE_ENRICHMENT_TIMEOUT_MS = 2_500;
 const LRCLIB = "https://lrclib.net/api";
 
 export async function handleGatewayRequest(
@@ -229,16 +237,34 @@ async function artists(
     };
   }).filter((item) => item.id && item.name);
   const firstResult = response[0];
-  if (firstResult?.wikidataUrl) {
-    const enhancement = await wikidataArtistProfile(
-      firstResult.wikidataUrl,
-      headers,
-      request,
-      context,
-      trace
-    );
-    firstResult.avatarUrl = enhancement.avatarUrl;
-    firstResult.description = enhancement.description;
+  if (firstResult) {
+    if (firstResult.wikidataUrl) {
+      const enhancement = await wikidataArtistProfile(
+        firstResult.wikidataUrl,
+        headers,
+        request,
+        context,
+        trace
+      );
+      firstResult.avatarUrl = enhancement.avatarUrl;
+      firstResult.description = enhancement.description;
+    }
+    if (!firstResult.avatarUrl || !firstResult.description) {
+      const supplement = await withRequestTimeout(
+        request,
+        NETEASE_ENRICHMENT_TIMEOUT_MS,
+        (enrichmentRequest) => neteaseArtistProfile(
+          name || firstResult.name,
+          [firstResult.name, name, ...firstResult.aliases],
+          !firstResult.description,
+          enrichmentRequest,
+          context,
+          trace
+        )
+      );
+      firstResult.avatarUrl ||= supplement.avatarUrl;
+      firstResult.description ||= supplement.description;
+    }
   }
   return result({ artists: response }, 200, trace, 86_400);
 }
@@ -339,6 +365,120 @@ function wikidataDescription(entity: Record<string, unknown>): string {
 
 function emptyArtistProfile(): ArtistProfileEnhancement {
   return { avatarUrl: "", description: "" };
+}
+
+async function withRequestTimeout<T>(
+  request: GatewayRequest,
+  timeoutMs: number,
+  operation: (request: GatewayRequest) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  request.signal?.addEventListener("abort", abort, { once: true });
+  if (request.signal?.aborted) controller.abort();
+  const timeout = setTimeout(abort, timeoutMs);
+  try {
+    return await operation({ ...request, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+    request.signal?.removeEventListener("abort", abort);
+  }
+}
+
+async function neteaseArtistProfile(
+  queryName: string,
+  acceptedNames: string[],
+  needsDescription: boolean,
+  request: GatewayRequest,
+  context: GatewayContext,
+  trace: RequestTrace
+): Promise<ArtistProfileEnhancement> {
+  const query = new URLSearchParams({
+    s: queryName,
+    type: "100",
+    limit: "5",
+    offset: "0",
+    total: "true"
+  });
+  const headers = neteaseHeaders(context);
+  const search = await upstream(`${NETEASE_SEARCH}?${query}`, headers, request, context, trace);
+  if (search.kind !== "success") return emptyArtistProfile();
+  const body = object(search.data);
+  if (number(body.code, 0) !== 200) return emptyArtistProfile();
+  const match = exactNeteaseArtist(array(object(body.result), "artists"), acceptedNames);
+  if (!match) return emptyArtistProfile();
+  if (!needsDescription) return { avatarUrl: match.avatarUrl, description: "" };
+
+  const detailQuery = new URLSearchParams({ id: match.id });
+  const detail = await upstream(
+    `${NETEASE_ARTIST_INTRODUCTION}?${detailQuery}`,
+    headers,
+    request,
+    context,
+    trace
+  );
+  if (detail.kind !== "success") return { avatarUrl: match.avatarUrl, description: "" };
+  const detailBody = object(detail.data);
+  if (number(detailBody.code, 0) !== 200) {
+    return { avatarUrl: match.avatarUrl, description: "" };
+  }
+  const briefDescription = cleanArtistDescription(detailBody.briefDesc);
+  const introduction = array(detailBody, "introduction")
+    .map((value) => cleanArtistDescription(object(value).txt))
+    .find(Boolean) || "";
+  return {
+    avatarUrl: match.avatarUrl,
+    description: briefDescription || introduction
+  };
+}
+
+function exactNeteaseArtist(values: unknown[], acceptedNames: string[]): NeteaseArtistMatch | undefined {
+  const names = new Set(acceptedNames.map(normalizedArtistName).filter(Boolean));
+  const match = values
+    .map(object)
+    .find((value) => names.has(normalizedArtistName(string(value.name))));
+  if (!match) return undefined;
+  const id = string(match.id).trim();
+  if (!/^[1-9]\d{0,18}$/.test(id)) return undefined;
+  return {
+    id,
+    avatarUrl: trustedNeteaseImage(string(match.picUrl))
+      || trustedNeteaseImage(string(match.img1v1Url))
+  };
+}
+
+function normalizedArtistName(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/gu, "");
+}
+
+function trustedNeteaseImage(value: string): string {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (
+      url.protocol !== "https:"
+      || !host.endsWith(".music.126.net")
+      || url.username
+      || url.password
+      || (url.port && url.port !== "443")
+    ) {
+      return "";
+    }
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function cleanArtistDescription(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .slice(0, 5_000)
+    .replace(/<[^>]*>/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1_000);
 }
 
 async function acoustIdLookup(
@@ -513,6 +653,14 @@ function hasLyrics(value: Record<string, unknown>): boolean {
 
 function upstreamHeaders(context: GatewayContext): Record<string, string> {
   return { Accept: "application/json", "User-Agent": context.env.appUserAgent };
+}
+
+function neteaseHeaders(context: GatewayContext): Record<string, string> {
+  return {
+    ...upstreamHeaders(context),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    Referer: "https://music.163.com/"
+  };
 }
 
 function upstreamFailure(requestId: string, trace: RequestTrace): GatewayResult {

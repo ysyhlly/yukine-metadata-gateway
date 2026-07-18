@@ -133,6 +133,7 @@ test("Wikidata artist profile enrichment prefers Chinese descriptions", async ()
   assert.equal(artist?.description, "日本女歌手及作词家");
   assert.equal(wikidataRequest?.searchParams.get("props"), "claims|descriptions");
   assert.equal(wikidataRequest?.searchParams.get("languages"), "zh|zh-hans|zh-hant|en");
+  assert.equal(transport.urls.some((url) => url.hostname === "music.163.com"), false);
 });
 
 test("Wikidata artist profile uses English description when Chinese is unavailable", async () => {
@@ -175,6 +176,201 @@ test("Wikidata artist profile uses English description when Chinese is unavailab
   assert.equal(response.status, 200);
   assert.equal(artist?.avatarUrl, "");
   assert.equal(artist?.description, "Japanese singer and lyricist");
+});
+
+test("NetEase supplements missing artist avatar and description after an exact match", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, {
+        artists: [{ id: RECORDING_ID, name: "Aimer", score: 100 }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, {
+        id: RECORDING_ID,
+        name: "Aimer",
+        aliases: [{ name: "エメ" }],
+        relations: [{
+          type: "wikidata",
+          url: { resource: "https://www.wikidata.org/wiki/Q123" }
+        }]
+      });
+    }
+    if (url.hostname === "www.wikidata.org") {
+      return success(url, { entities: { Q123: { claims: {}, descriptions: {} } } });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: {
+          artists: [{
+            id: 16152,
+            name: "Aimer",
+            picUrl: "https://p1.music.126.net/portrait.jpg"
+          }]
+        }
+      });
+    }
+    if (url.pathname === "/api/artist/introduction") {
+      return success(url, {
+        code: 200,
+        briefDesc: "Aimer 是一名日本女歌手及作词家。"
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v1/artists/search?name=Aimer", transport);
+  const artist = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists[0];
+  const searchRequest = transport.urls.find((url) => url.pathname === "/api/cloudsearch/pc");
+  const detailRequest = transport.urls.find((url) => url.pathname === "/api/artist/introduction");
+
+  assert.equal(response.status, 200);
+  assert.equal(artist?.avatarUrl, "https://p1.music.126.net/portrait.jpg");
+  assert.equal(artist?.description, "Aimer 是一名日本女歌手及作词家。");
+  assert.equal(searchRequest?.searchParams.get("type"), "100");
+  assert.equal(searchRequest?.searchParams.get("limit"), "5");
+  assert.equal(detailRequest?.searchParams.get("id"), "16152");
+});
+
+test("NetEase fills only a missing avatar without replacing Wikidata description", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, {
+        artists: [{ id: RECORDING_ID, name: "Aimer", score: 100 }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, {
+        id: RECORDING_ID,
+        name: "Aimer",
+        relations: [{
+          type: "wikidata",
+          url: { resource: "https://www.wikidata.org/wiki/Q123" }
+        }]
+      });
+    }
+    if (url.hostname === "www.wikidata.org") {
+      return success(url, {
+        entities: {
+          Q123: {
+            claims: {},
+            descriptions: {
+              zh: { language: "zh", value: "来自 Wikidata 的介绍" }
+            }
+          }
+        }
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: {
+          artists: [{
+            id: 16152,
+            name: "Aimer",
+            picUrl: "https://p1.music.126.net/portrait.jpg"
+          }]
+        }
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v1/artists/search?name=Aimer", transport);
+  const artist = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists[0];
+
+  assert.equal(response.status, 200);
+  assert.equal(artist?.avatarUrl, "https://p1.music.126.net/portrait.jpg");
+  assert.equal(artist?.description, "来自 Wikidata 的介绍");
+  assert.equal(
+    transport.urls.some((url) => url.pathname === "/api/artist/introduction"),
+    false
+  );
+});
+
+test("NetEase rejects untrusted artist images and sanitizes introduction fallback", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, {
+        artists: [{ id: RECORDING_ID, name: "Aimer", score: 100 }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, { id: RECORDING_ID, name: "Aimer" });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: {
+          artists: [
+            { id: 1, name: "Not Aimer", picUrl: "https://p1.music.126.net/wrong.jpg" },
+            { id: 16152, name: "Aimer", picUrl: "https://images.example.com/portrait.jpg" }
+          ]
+        }
+      });
+    }
+    if (url.pathname === "/api/artist/introduction") {
+      return success(url, {
+        code: 200,
+        briefDesc: "",
+        introduction: [{ txt: "<b>日本歌手</b>\u0000及作词家" }]
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v1/artists/search?name=Aimer", transport);
+  const artist = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists[0];
+
+  assert.equal(response.status, 200);
+  assert.equal(artist?.avatarUrl, "");
+  assert.equal(artist?.description, "日本歌手 及作词家");
+});
+
+test("NetEase ignores non-matching artist search results", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, {
+        artists: [{ id: RECORDING_ID, name: "Aimer", score: 100 }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, { id: RECORDING_ID, name: "Aimer" });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: {
+          artists: [{
+            id: 999,
+            name: "AIMERS",
+            picUrl: "https://p1.music.126.net/wrong.jpg"
+          }]
+        }
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v1/artists/search?name=Aimer", transport);
+  const artist = (response.body as {
+    artists: Array<{ avatarUrl: string; description: string }>;
+  }).artists[0];
+
+  assert.equal(response.status, 200);
+  assert.equal(artist?.avatarUrl, "");
+  assert.equal(artist?.description, "");
+  assert.equal(
+    transport.urls.some((url) => url.pathname === "/api/artist/introduction"),
+    false
+  );
 });
 
 test("artist detail enhancement failure preserves the successful base result", async () => {
