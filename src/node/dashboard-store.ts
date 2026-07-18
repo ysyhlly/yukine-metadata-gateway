@@ -147,6 +147,8 @@ export class DashboardStore {
           ON dashboard_upstream_minute(bucket_start_ms);
       `);
       securePermissions(options.path, 0o600);
+      securePermissions(`${options.path}-wal`, 0o600);
+      securePermissions(`${options.path}-shm`, 0o600);
       this.database = database;
       this.cleanup(Date.now());
     } catch (error) {
@@ -435,7 +437,12 @@ function securePermissions(path: string, mode: number): void {
   try {
     chmodSync(path, mode);
   } catch (error) {
-    if (process.platform !== "win32") throw error;
+    if (
+      process.platform !== "win32"
+      && (error as NodeJS.ErrnoException).code !== "ENOENT"
+    ) {
+      throw error;
+    }
   }
 }
 
