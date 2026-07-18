@@ -1,9 +1,9 @@
 import type { RequestTrace } from "../types.js";
 import {
-  DashboardStore,
   type RequestMetricRow,
   type UpstreamMetricRow
 } from "./dashboard-store.js";
+import type { DashboardStoreAdapter } from "./dashboard-store-adapter.js";
 
 const MINUTE_MS = 60_000;
 const LATENCY_THRESHOLDS = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000];
@@ -43,12 +43,15 @@ export class DashboardMetrics {
   private readonly startedAt = Date.now();
   private readonly timer: NodeJS.Timeout;
   private lastCleanupAt = 0;
+  private flushTail: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly store: DashboardStore,
+    private readonly store: DashboardStoreAdapter,
     private readonly options: DashboardMetricsOptions
   ) {
-    this.timer = setInterval(() => this.flush(), 1_000);
+    this.timer = setInterval(() => {
+      void this.flush().catch(() => {});
+    }, 1_000);
     this.timer.unref();
   }
 
@@ -59,7 +62,7 @@ export class DashboardMetrics {
     trace: RequestTrace,
     now = Date.now()
   ): void {
-    if (!route.startsWith("/v1/")) return;
+    if (!route.startsWith("/v1/") && !route.startsWith("/v2/")) return;
     const bucketStartMs = Math.floor(now / MINUTE_MS) * MINUTE_MS;
     const requestKey = [bucketStartMs, route, status].join("\u0000");
     let requestRow = this.requestRows.get(requestKey);
@@ -96,7 +99,7 @@ export class DashboardMetrics {
     }
 
     for (const attempt of trace.upstream) {
-      const outcome = upstreamOutcome(attempt.status);
+      const outcome = upstreamOutcome(attempt.status, attempt.outcome);
       const upstreamKey = [bucketStartMs, route, attempt.host, outcome].join("\u0000");
       let upstreamRow = this.upstreamRows.get(upstreamKey);
       if (!upstreamRow) {
@@ -106,15 +109,17 @@ export class DashboardMetrics {
       upstreamRow.attempts += 1;
     }
 
-    if (this.requestRows.size + this.upstreamRows.size >= 100) this.flush(now);
+    if (this.requestRows.size + this.upstreamRows.size >= 100) {
+      void this.flush(now).catch(() => {});
+    }
   }
 
-  snapshot(window: DashboardWindow, now = Date.now()) {
-    this.flush(now);
+  async snapshot(window: DashboardWindow, now = Date.now()) {
+    await this.flush(now);
     const windowMs = WINDOWS[window];
     const since = Math.floor((now - windowMs) / MINUTE_MS) * MINUTE_MS;
-    const requestRows = this.store.readRequestMetrics(since);
-    const upstreamRows = this.store.readUpstreamSummary(since);
+    const requestRows = await this.store.readRequestMetrics(since);
+    const upstreamRows = await this.store.readUpstreamSummary(since);
     const overall = emptyAggregate();
     const routeAggregates = new Map<string, Aggregate>();
     const statusCounts = new Map<number, number>();
@@ -216,7 +221,7 @@ export class DashboardMetrics {
         cacheMaxEntries: cache.maxEntries
       },
       definitions: {
-        scope: "仅统计 Node 运行时的 /v1/* 业务请求；健康探针和面板流量已排除。",
+        scope: "仅统计 Node 运行时的 /v1/* 与 /v2/* 业务请求；健康探针和面板流量已排除。",
         availability: "1 − 5xx 请求数 ÷ 总请求数。",
         cacheHitRate: "至少一次上游读取命中 SQLite 的请求 ÷ 存在上游尝试的请求。",
         upstreamAvailability: "1 − 上游失败尝试数 ÷ 上游总尝试数；已知 404 视为可达。",
@@ -225,25 +230,35 @@ export class DashboardMetrics {
     };
   }
 
-  flush(now = Date.now()): void {
-    if (this.requestRows.size > 0 || this.upstreamRows.size > 0) {
-      this.store.writeMetrics([...this.requestRows.values()], [...this.upstreamRows.values()]);
-      this.requestRows.clear();
-      this.upstreamRows.clear();
-    }
-    if (now - this.lastCleanupAt >= 5 * MINUTE_MS) {
-      this.store.cleanup(now);
-      this.lastCleanupAt = now;
-    }
+  flush(now = Date.now()): Promise<void> {
+    const requests = [...this.requestRows.values()];
+    const upstream = [...this.upstreamRows.values()];
+    this.requestRows.clear();
+    this.upstreamRows.clear();
+    const cleanup = now - this.lastCleanupAt >= 5 * MINUTE_MS;
+    if (cleanup) this.lastCleanupAt = now;
+    this.flushTail = this.flushTail.then(async () => {
+      if (requests.length || upstream.length) {
+        await this.store.writeMetrics(requests, upstream);
+      }
+      if (cleanup) await this.store.cleanup(now);
+    });
+    return this.flushTail;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     clearInterval(this.timer);
-    this.flush();
+    await this.flush();
   }
 }
 
-function upstreamOutcome(status: number): UpstreamMetricRow["outcome"] {
+function upstreamOutcome(
+  status: number,
+  detailed?: string
+): UpstreamMetricRow["outcome"] {
+  if (detailed === "success") return "success";
+  if (detailed === "not_found") return "not_found";
+  if (detailed) return "failure";
   if (status === 404) return "not_found";
   if (status >= 200 && status < 400) return "success";
   return "failure";

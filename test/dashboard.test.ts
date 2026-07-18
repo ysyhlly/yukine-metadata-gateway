@@ -211,7 +211,7 @@ test("dashboard metrics survive reopening the same SQLite file", async (context)
     80,
     { cacheHit: false, upstream: [{ host: "lrclib.net", status: 200 }] }
   );
-  firstMetrics.close();
+  await firstMetrics.close();
   firstStore.close();
 
   const reopenedStore = new DashboardStore(options);
@@ -219,11 +219,11 @@ test("dashboard metrics survive reopening the same SQLite file", async (context)
     retentionDays: 30,
     cacheStats: () => ({ entries: 2, maxEntries: 10 })
   });
-  const snapshot = reopenedMetrics.snapshot("1h");
+  const snapshot = await reopenedMetrics.snapshot("1h");
   assert.equal(snapshot.summary.requests, 1);
   assert.equal(snapshot.routes[0]?.route, "/v1/lyrics/search");
   assert.equal(snapshot.upstream[0]?.host, "lrclib.net");
-  reopenedMetrics.close();
+  await reopenedMetrics.close();
   reopenedStore.close();
 });
 

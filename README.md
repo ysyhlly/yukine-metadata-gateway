@@ -5,9 +5,18 @@
 ## API
 
 - `GET /health`
+- `GET /ready`
+- `GET /openapi.json`
 - `GET /v1/recordings/search`
 - `GET /v1/artists/search`
 - `GET /v1/lyrics/search`
+- `GET /v2/recordings/search`
+- `GET /v2/artists/search`
+- `GET /v2/lyrics/search`
+
+`/health` 只表示进程存活，不会探测音乐来源；`/ready` 只检查运行时初始化和所选状态后端。OpenAPI 3.1 由同一套 Zod 4 请求/响应 schema 在构建时生成，Node 与 Worker 都从 `/openapi.json` 提供。
+
+v2 对非法参数严格返回 `400 invalid_request`，只列字段名和错误码。每个实体均包含 `canonicalId`、`confidence` 和逐字段 `sources`；录音标识统一收敛到 `identifiers`。文本录音搜索并发收集 MusicBrainz 与 iTunes，强 MBID、ISRC 或已验证 AcoustID 证据优先；版本标记冲突和强标识冲突不会自动合并。v1 的字段、宽松参数解析和错误语义保持不变。
 
 录音接口的 `coverUrl` 只会返回 MusicBrainz 已声明 front artwork 的 Cover Art Archive URL，或 HTTPS `*.mzstatic.com` iTunes 图片。歌词接口接受必填 `title`，以及可选 `artist`、`album`、`durationMs`；无结果返回 `{"lyrics":null}`。
 
@@ -27,17 +36,19 @@ npm run build:node
 npm run dry-run
 ```
 
+`npm run test:external` 是 Redis/PostgreSQL 双实例集成测试，需要设置 `TEST_REDIS_URL` 和 `TEST_DATABASE_URL`；CI 会自动启动依赖并执行。
+
 启动 Node 服务（默认不启用管理面板）：
 
 ```bash
 HOST=127.0.0.1 PORT=8787 CACHE_DB_PATH=./data/cache.sqlite npm start
 ```
 
-Node 启动时必须成功打开 SQLite；数据库损坏或不可写时进程会直接退出。请求日志只包含 request ID、路由、状态、耗时、缓存命中和上游主机/状态，不包含标题、查询串、指纹或密钥。
+默认 SQLite 模式下，Node 启动时必须成功打开数据库；数据库损坏或不可写时进程会直接退出。请求日志只包含 request ID、路由、状态、耗时、缓存层、Provider 和结果类别，不包含标题、艺人、查询串、指纹、完整 URL 或密钥。
 
 ## 可视化监控面板
 
-Node/Docker 运行时提供 `/admin` 监控面板；Cloudflare Worker 不包含该入口。面板统计 `/v1/*` 业务请求的请求量、可用率、端到端延迟、SQLite 缓存命中率、状态码、路由和上游主机状态，排除 `/health` 与面板自身流量。分钟级指标保存在独立 SQLite 数据库，默认保留 30 天，容器重启后仍可读取。
+Node/Docker 运行时提供 `/admin` 监控面板；Cloudflare Worker 不包含该入口。面板统计 `/v1/*` 与 `/v2/*` 业务请求的请求量、可用率、端到端延迟、缓存命中率、状态码、路由和上游主机状态，排除健康检查与面板自身流量。SQLite 模式把分钟指标保存在独立 SQLite 数据库；external 模式使用 PostgreSQL，默认保留 30 天。
 
 首次启用时必须提供至少 32 个字符的一次性引导令牌，否则新数据库会拒绝启动：
 
@@ -51,7 +62,7 @@ npm start
 
 打开 `https://metadata.example.com/admin/setup#一次性引导令牌`，设置 3–64 字符的登录账号和至少 12 字节的密码。令牌放在 URL fragment 中，不会发送给服务器或进入访问日志；页面读取后会立即从地址栏移除。设置成功后应从部署环境删除 `DASHBOARD_SETUP_TOKEN` 并重启，已有管理员不会受影响。
 
-密码使用带随机盐的 scrypt 保存；会话令牌只以 SHA-256 摘要写入 SQLite。Cookie 为 `Secure`、`HttpOnly`、`SameSite=Strict`，默认闲置 30 分钟、最长 8 小时。设置、登录和退出接口要求固定 `DASHBOARD_PUBLIC_ORIGIN` 的同源请求，退出还要求会话 CSRF token。
+密码使用带随机盐的 scrypt 保存；会话令牌只以 SHA-256 摘要写入所选状态后端。Cookie 为 `Secure`、`HttpOnly`、`SameSite=Strict`，默认闲置 30 分钟、最长 8 小时。设置、登录和退出接口要求固定 `DASHBOARD_PUBLIC_ORIGIN` 的同源请求，退出还要求会话 CSRF token。
 
 ## Docker Compose
 
@@ -64,6 +75,7 @@ docker compose build
 docker compose up -d
 docker compose ps
 curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/ready
 ```
 
 首次启动后从 `.env` 读取令牌，并访问 `http://localhost:8787/admin/setup#该令牌` 完成初始化。生产环境必须使用 HTTPS；HTTP 仅允许 `localhost`、`127.0.0.1` 或 `::1` 的本地开发来源。
@@ -82,7 +94,9 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `HOST`、`PORT`
 - `CACHE_DB_PATH`
 - `CACHE_TTL_SECONDS`（默认 3600）
+- `CACHE_STALE_SECONDS`（默认 86400；fresh 过期后允许 stale-while-revalidate 的秒数）
 - `CACHE_MAX_ENTRIES`（默认 10000）
+- `MEMORY_CACHE_MAX_ENTRIES`（每实例 L1 LRU，默认 1000）
 - `UPSTREAM_TIMEOUT_MS`（默认 4500）
 - `REQUEST_TIMEOUT_MS`（默认 10000）
 - `MAX_CONCURRENT_REQUESTS`（默认 500；Node 正在处理的请求达到上限后返回 `503 server_busy`）
@@ -90,6 +104,11 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `TRUST_PROXY`（直接运行默认 `false`；Compose 在仅由本机反向代理转发时默认 `true`）
 - `APP_USER_AGENT`
 - 可选 `ACOUSTID_API_KEY`
+- `STATE_BACKEND=sqlite|external`（默认 `sqlite`）
+- external 模式必需的 `REDIS_URL` 与 `DATABASE_URL`；依赖不可用时 `/ready` 失败，不会回退到 SQLite
+- `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_SERVICE_NAME`（可选 OTLP/HTTP traces 与 metrics）
+- `V2_ENABLED`（默认 `true`，可用于灰度）
+- `V1_SUNSET_DATE`（可选 HTTP-date；设置后 v1 返回 `Deprecation`、`Sunset` 与规范链接）
 - `DASHBOARD_ENABLED`（Compose 默认 `true`，直接运行 Node 默认 `false`）
 - `DASHBOARD_DB_PATH`（Compose 为 `/data/dashboard.sqlite`）
 - `DASHBOARD_PUBLIC_ORIGIN`（浏览器访问面板的固定 origin）
@@ -97,6 +116,27 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `DASHBOARD_SESSION_IDLE_SECONDS`（默认 1800）
 - `DASHBOARD_SESSION_ABSOLUTE_SECONDS`（默认 28800）
 - `DASHBOARD_METRICS_RETENTION_DAYS`（默认 30）
+
+### Redis/PostgreSQL 多实例
+
+external 模式用 Redis 承载共享缓存、刷新租约、跨副本请求协调、Provider 配额与熔断状态；PostgreSQL 承载管理员、会话和分钟指标。元数据缓存不迁移，切换后会自动重新预热；管理员和历史分钟指标可幂等迁移，旧会话故意不迁移，切换后需要重新登录。
+
+```bash
+export POSTGRES_PASSWORD='replace-with-a-strong-secret'
+docker compose -f compose.external.yaml --profile external up -d --build --scale metadata-gateway-external=2
+docker compose -f compose.external.yaml --profile external ps
+```
+
+迁移前先备份 SQLite 数据文件，并让 PostgreSQL 可访问：
+
+```bash
+STATE_BACKEND=external \
+DATABASE_URL='postgres://yukine:password@127.0.0.1:5432/yukine' \
+DASHBOARD_DB_PATH='./data/dashboard.sqlite' \
+npm run migrate:external-state
+```
+
+迁移工具以源数据库内容摘要记录批次，在事务中写入管理员和历史分钟指标；重复执行不会重复导入。完成后将反向代理的 readiness 指向 `/ready`，并确认至少两个副本的共享缓存、登录会话和指标汇总。
 
 ### 数据卷备份
 
@@ -136,6 +176,8 @@ npx wrangler secret put ACOUSTID_API_KEY
 npm run check:worker
 npm run deploy
 ```
+
+Worker 保持 Cloudflare Cache 和 isolate 内 SingleFlight，通过 `waitUntil()` 执行 stale 后台刷新；不会连接 Redis/PostgreSQL，也不会打包 Node OpenTelemetry SDK。
 
 ## Android
 

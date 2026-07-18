@@ -7,29 +7,65 @@ import { JsonFetchTransport } from "../transport.js";
 import type { GatewayResult } from "../types.js";
 import { loadNodeGatewayConfig, type NodeGatewayConfig } from "./config.js";
 import { Dashboard, type DashboardResponse } from "./dashboard.js";
+import { RedisJsonCache } from "./redis-cache.js";
 import { SqliteJsonCache } from "./sqlite-cache.js";
+import type { UpstreamJsonCache } from "../types.js";
+import { startNodeTelemetry } from "./telemetry.js";
+import type { NodeTelemetryRuntime } from "./telemetry.js";
+import { PostgresReadiness } from "./postgres-readiness.js";
 
 export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConfig()) {
-  const cache = new SqliteJsonCache({
-    path: config.cacheDbPath,
-    ttlSeconds: config.cacheTtlSeconds,
-    maxEntries: config.cacheMaxEntries
-  });
+  const sqliteCache = config.stateBackend !== "external"
+    ? new SqliteJsonCache({
+        path: config.cacheDbPath,
+        ttlSeconds: config.cacheTtlSeconds,
+        staleSeconds: config.cacheStaleSeconds,
+        maxEntries: config.cacheMaxEntries
+      })
+    : undefined;
+  const redisCache = config.stateBackend === "external"
+    ? new RedisJsonCache({
+        url: required(config.redisUrl, "redis_url_required"),
+        ttlSeconds: config.cacheTtlSeconds,
+        staleSeconds: config.cacheStaleSeconds ?? 86_400
+      })
+    : undefined;
+  const cache: UpstreamJsonCache = redisCache || sqliteCache!;
   const transport = new JsonFetchTransport({
     timeoutMs: config.upstreamTimeoutMs,
-    cache
+    cache,
+    memoryMaxEntries: config.memoryCacheMaxEntries,
+    freshMs: config.cacheTtlSeconds * 1_000,
+    staleMs: (config.cacheStaleSeconds ?? 86_400) * 1_000,
+    coordinator: redisCache
   });
+  const telemetry = startNodeTelemetry(
+    config.otelEndpoint,
+    config.otelServiceName || "yukine-metadata-gateway"
+  );
+  const postgres = config.stateBackend === "external"
+    ? new PostgresReadiness(required(config.databaseUrl, "database_url_required"))
+    : undefined;
   let dashboard: Dashboard | undefined;
   try {
     dashboard = config.dashboard
-      ? new Dashboard(config.dashboard, () => cache.stats())
+      ? new Dashboard(
+          config.dashboard,
+          () => sqliteCache?.stats() || transport.stats()
+        )
       : undefined;
   } catch (error) {
-    cache.close();
+    void cache.close();
     throw error;
   }
   const concurrency = new RequestConcurrencyLimiter(config.maxConcurrentRequests);
   const requestRate = new RequestRateLimiter(config.maxRequestsPerSecond);
+  const ready = async () => {
+    const cacheReady = await cache.ready?.() ?? true;
+    const postgresReady = await postgres?.ready() ?? true;
+    const dashboardReady = await dashboard?.ready() ?? true;
+    return cacheReady && postgresReady && dashboardReady;
+  };
   const server = createServer(
     {
       maxHeaderSize: 64 * 1024,
@@ -45,7 +81,15 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
         return;
       }
       try {
-        await serveRequest(request, response, config, transport, dashboard);
+        await serveRequest(
+          request,
+          response,
+          config,
+          transport,
+          dashboard,
+          ready,
+          telemetry
+        );
       } finally {
         concurrency.release();
       }
@@ -60,9 +104,14 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     if (closing) return;
     closing = true;
     server.close(() => {
-      dashboard?.close();
-      cache.close();
-      process.exitCode = 0;
+      void Promise.all([
+        dashboard?.close(),
+        cache.close(),
+        postgres?.close(),
+        telemetry.shutdown()
+      ]).finally(() => {
+        process.exitCode = 0;
+      });
     });
     setTimeout(() => {
       server.closeAllConnections();
@@ -70,7 +119,28 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
   };
   process.once("SIGINT", close);
   process.once("SIGTERM", close);
-  return { server, close, cache, dashboard, concurrency, requestRate };
+  return {
+    server,
+    close,
+    cache,
+    dashboard,
+    concurrency,
+    requestRate,
+    ready,
+    transport,
+    telemetry
+  };
+}
+
+export async function startNodeGatewayReady(
+  config: NodeGatewayConfig = loadNodeGatewayConfig()
+) {
+  const runtime = startNodeGateway(config);
+  if (!await runtime.ready()) {
+    runtime.close();
+    throw new Error("metadata_gateway_not_ready");
+  }
+  return runtime;
 }
 
 export class RequestConcurrencyLimiter {
@@ -120,7 +190,9 @@ async function serveRequest(
   response: ServerResponse,
   config: NodeGatewayConfig,
   transport: JsonFetchTransport,
-  dashboard?: Dashboard
+  dashboard: Dashboard | undefined,
+  ready: () => Promise<boolean>,
+  telemetry: NodeTelemetryRuntime
 ): Promise<void> {
   const startedAt = Date.now();
   const requestId = randomUUID();
@@ -162,23 +234,36 @@ async function serveRequest(
   }
   let gatewayResult: GatewayResult;
   try {
-    gatewayResult = await handleGatewayRequest(
+    gatewayResult = await telemetry.run({
+      route: url.pathname,
+      traceparent: singleHeader(request.headers.traceparent),
+      tracestate: singleHeader(request.headers.tracestate)
+    }, () => handleGatewayRequest(
       {
         method: request.method || "GET",
         url: url.toString(),
         requestId,
-        signal: controller.signal
+        signal: controller.signal,
+        traceparent: singleHeader(request.headers.traceparent),
+        tracestate: singleHeader(request.headers.tracestate)
       },
       {
         env: {
           acoustidApiKey: config.acoustidApiKey,
           appUserAgent: config.appUserAgent,
           runtime: "node",
-          cache: "sqlite"
+          cache: config.stateBackend === "external" ? "redis" : "sqlite",
+          v2Enabled: config.v2Enabled,
+          v1SunsetDate: config.v1SunsetDate
         },
-        transport
+        transport,
+        defer: (task) => {
+          void task.catch(() => {});
+        },
+        ready,
+        telemetry: telemetry.sink
       }
-    );
+    ));
   } catch {
     gatewayResult = {
       status: 502,
@@ -197,7 +282,19 @@ async function serveRequest(
   response.end(JSON.stringify(gatewayResult.body));
   const durationMs = Date.now() - startedAt;
   dashboard?.record(url.pathname, gatewayResult.status, durationMs, gatewayResult.trace);
+  telemetry.sink?.recordGatewayRequest({
+    route: url.pathname,
+    status: gatewayResult.status,
+    durationMs,
+    runtime: "node",
+    cache: config.stateBackend === "external" ? "redis" : "sqlite",
+    trace: gatewayResult.trace
+  });
   writeLog(requestId, url.pathname, gatewayResult.status, startedAt, gatewayResult.trace);
+}
+
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function writeDashboardResponse(
@@ -290,10 +387,13 @@ function safeRoute(value: string | undefined): string {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    startNodeGateway();
-  } catch {
+  void startNodeGatewayReady().catch(() => {
     process.stderr.write("metadata-gateway: initialization_failed\n");
     process.exitCode = 1;
-  }
+  });
+}
+
+function required(value: string | undefined, error: string): string {
+  if (!value) throw new Error(error);
+  return value;
 }

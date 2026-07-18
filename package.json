@@ -4,11 +4,15 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "check": "npm run check:worker && npm run check:node",
+    "check": "npm run check:worker && npm run check:node && npm run check:openapi",
     "check:worker": "tsc -p tsconfig.worker.json --noEmit",
     "check:node": "tsc -p tsconfig.node.json --noEmit",
+    "check:openapi": "tsx scripts/generate-openapi.ts --check",
+    "generate:openapi": "tsx scripts/generate-openapi.ts",
     "build:node": "tsc -p tsconfig.node.json",
     "test": "tsx --test test/*.test.ts",
+    "test:external": "tsx --test test/external-state.integration.ts",
+    "migrate:external-state": "tsx src/node/migrate-external-state.ts",
     "start": "node dist/node/server.js",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
@@ -17,8 +21,20 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260716.1",
     "@types/node": "^24.10.0",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.20.6",
     "typescript": "^7.0.2",
     "wrangler": "^4.111.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.220.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/sdk-metrics": "^2.9.0",
+    "@opentelemetry/sdk-node": "^0.220.0",
+    "ioredis": "^5.11.1",
+    "pg": "^8.22.0",
+    "zod": "^4.4.3",
+    "zod-openapi": "^6.0.0"
   }
 }

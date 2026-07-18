@@ -5,6 +5,23 @@ import type {
   RequestTrace,
   UpstreamJsonResult
 } from "./types.js";
+import {
+  artistQuerySchema,
+  artistResponseSchema,
+  lyricsQuerySchema,
+  lyricsResponseSchema,
+  queryObject,
+  recordingQuerySchema,
+  recordingResponseSchema,
+  validationIssues
+} from "./contracts/v2.js";
+import { openapiDocument } from "./contracts/openapi.js";
+import {
+  resolveCanonicalRecordings,
+  type SourceAttribution
+} from "./identity/recording.js";
+import { providerManagerFor } from "./providers/manager.js";
+import type { AttemptSummary, ProviderName } from "./providers/types.js";
 
 interface ArtistEvidence {
   id: string;
@@ -28,14 +45,10 @@ interface RecordingEvidence {
   score: number;
 }
 
-interface AttemptSummary {
-  attempted: number;
-  reachable: number;
-}
-
 interface ArtistProfileEnhancement {
   avatarUrl: string;
   description: string;
+  providerId?: string;
 }
 
 interface NeteaseArtistMatch {
@@ -43,14 +56,9 @@ interface NeteaseArtistMatch {
   avatarUrl: string;
 }
 
-const MB = "https://musicbrainz.org/ws/2/";
-const ITUNES = "https://itunes.apple.com/search";
-const ACOUSTID = "https://api.acoustid.org/v2/lookup";
-const WIKIDATA_API = "https://www.wikidata.org/w/api.php";
-const NETEASE_SEARCH = "https://music.163.com/api/cloudsearch/pc";
-const NETEASE_ARTIST_INTRODUCTION = "https://music.163.com/api/artist/introduction";
 const NETEASE_ENRICHMENT_TIMEOUT_MS = 2_500;
-const LRCLIB = "https://lrclib.net/api";
+const ARTIST_SOURCES = Symbol("artistSources");
+const LYRICS_MATCH = Symbol("lyricsMatch");
 
 export async function handleGatewayRequest(
   request: GatewayRequest,
@@ -68,14 +76,43 @@ export async function handleGatewayRequest(
         acoustid: Boolean(context.env.acoustidApiKey)
       }, 200, trace);
     }
+    if (url.pathname === "/ready") {
+      const ready = await context.ready?.() ?? true;
+      return result({
+        ready,
+        runtime: context.env.runtime,
+        state: context.env.cache
+      }, ready ? 200 : 503, trace);
+    }
+    if (url.pathname === "/openapi.json") {
+      return result(openapiDocument, 200, trace, 3_600);
+    }
     if (url.pathname === "/v1/recordings/search") {
-      return recordings(url.searchParams, request, context, trace);
+      return withV1Deprecation(
+        await recordings(url.searchParams, request, context, trace),
+        context
+      );
     }
     if (url.pathname === "/v1/artists/search") {
-      return artists(url.searchParams, request, context, trace);
+      return withV1Deprecation(
+        await artists(url.searchParams, request, context, trace),
+        context
+      );
     }
     if (url.pathname === "/v1/lyrics/search") {
-      return lyrics(url.searchParams, request, context, trace);
+      return withV1Deprecation(
+        await lyrics(url.searchParams, request, context, trace),
+        context
+      );
+    }
+    if (context.env.v2Enabled !== false && url.pathname === "/v2/recordings/search") {
+      return recordingsV2(url.searchParams, request, context, trace);
+    }
+    if (context.env.v2Enabled !== false && url.pathname === "/v2/artists/search") {
+      return artistsV2(url.searchParams, request, context, trace);
+    }
+    if (context.env.v2Enabled !== false && url.pathname === "/v2/lyrics/search") {
+      return lyricsV2(url.searchParams, request, context, trace);
     }
     return result({ error: "not_found" }, 404, trace);
   } catch {
@@ -105,7 +142,8 @@ async function recordings(
   const evidence: RecordingEvidence[] = [];
   if (recordingMbid) {
     const response = await upstream(
-      `${MB}recording/${recordingMbid}?inc=artists+isrcs+releases+work-rels&fmt=json`,
+      "musicbrainz",
+      { operation: "recording-by-id", id: recordingMbid },
       headers,
       request,
       context,
@@ -116,7 +154,8 @@ async function recordings(
   }
   if (evidence.length === 0 && isrc) {
     const response = await upstream(
-      `${MB}isrc/${encodeURIComponent(isrc)}?inc=artist-credits+releases+work-rels&fmt=json`,
+      "musicbrainz",
+      { operation: "recordings-by-isrc", isrc },
       headers,
       request,
       context,
@@ -144,7 +183,8 @@ async function recordings(
     const clauses = [`recording:"${escapeLucene(title)}"`];
     if (artist) clauses.push(`artist:"${escapeLucene(artist)}"`);
     const response = await upstream(
-      `${MB}recording/?query=${encodeURIComponent(clauses.join(" AND "))}&limit=${limit}&fmt=json`,
+      "musicbrainz",
+      { operation: "recording-search", clauses, limit },
       headers,
       request,
       context,
@@ -164,6 +204,108 @@ async function recordings(
   return result({ recordings: dedupeRecordings(evidence).slice(0, limit) }, 200, trace, 86_400);
 }
 
+async function recordingsV2(
+  params: URLSearchParams,
+  request: GatewayRequest,
+  context: GatewayContext,
+  trace: RequestTrace
+): Promise<GatewayResult> {
+  const parsed = recordingQuerySchema.safeParse(queryObject(params));
+  if (!parsed.success) return invalidV2(request.requestId, parsed.error, trace);
+  const query = parsed.data;
+  const headers = upstreamHeaders(context);
+  const summary: AttemptSummary = { attempted: 0, reachable: 0 };
+  const evidence: RecordingEvidence[] = [];
+  const isrc = query.isrc?.replace(/[^a-z0-9]/giu, "").toUpperCase() || "";
+
+  if (query.recordingMbid) {
+    const response = await upstream(
+      "musicbrainz",
+      { operation: "recording-by-id", id: query.recordingMbid },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    );
+    if (response.kind === "success") evidence.push(...mapMbRecordings([response.data], true));
+  }
+  if (isrc) {
+    const response = await upstream(
+      "musicbrainz",
+      { operation: "recordings-by-isrc", isrc },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    );
+    if (response.kind === "success") {
+      evidence.push(...mapMbRecordings(array(response.data, "recordings"), true));
+    }
+  }
+  if (query.fingerprint && query.fingerprintDuration && context.env.acoustidApiKey) {
+    evidence.push(...await acoustIdLookup(
+      query.fingerprint,
+      query.fingerprintDuration,
+      context.env.acoustidApiKey,
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    ));
+  }
+
+  const supplementTitle = query.title || evidence[0]?.title || "";
+  const supplementArtist = query.artist || evidence[0]?.artists[0]?.name || "";
+  if (supplementTitle) {
+    const clauses = [`recording:"${escapeLucene(supplementTitle)}"`];
+    if (supplementArtist) clauses.push(`artist:"${escapeLucene(supplementArtist)}"`);
+    const [musicbrainz, itunes] = await Promise.all([
+      upstream(
+        "musicbrainz",
+        { operation: "recording-search", clauses, limit: query.limit },
+        headers,
+        request,
+        context,
+        trace,
+        summary
+      ).then((response) => response.kind === "success"
+        ? mapMbRecordings(array(response.data, "recordings"), false)
+        : []),
+      itunesLookup(
+        supplementTitle,
+        supplementArtist,
+        query.limit,
+        headers,
+        request,
+        context,
+        trace,
+        summary
+      )
+    ]);
+    evidence.push(...musicbrainz, ...itunes);
+  }
+  if (evidence.length === 0 && summary.attempted > 0 && summary.reachable === 0) {
+    return upstreamFailure(request.requestId, trace);
+  }
+  const canonical = resolveCanonicalRecordings(evidence).slice(0, query.limit);
+  for (const recording of canonical) {
+    context.telemetry?.recordIdentityDecision({
+      entity: "recording",
+      decision: recording.sources.length > 1
+        ? "merged"
+        : recording.possibleDuplicates.length
+          ? "possible_duplicate"
+          : "independent",
+      confidence: recording.confidence
+    });
+  }
+  const body = recordingResponseSchema.parse({ recordings: canonical });
+  return result(body, 200, trace, 86_400);
+}
+
 async function artists(
   params: URLSearchParams,
   request: GatewayRequest,
@@ -179,7 +321,8 @@ async function artists(
   let values: unknown[] = [];
   if (artistMbid) {
     const response = await upstream(
-      `${MB}artist/${artistMbid}?inc=aliases+url-rels&fmt=json`,
+      "musicbrainz",
+      { operation: "artist-by-id", id: artistMbid },
       headers,
       request,
       context,
@@ -189,9 +332,10 @@ async function artists(
     if (response.kind === "success") values = [response.data];
   }
   if (values.length === 0 && name) {
-    const query = encodeURIComponent(`artist:"${escapeLucene(name)}"`);
+    const query = `artist:"${escapeLucene(name)}"`;
     const response = await upstream(
-      `${MB}artist/?query=${query}&limit=${limit}&fmt=json`,
+      "musicbrainz",
+      { operation: "artist-search", query, limit },
       headers,
       request,
       context,
@@ -203,7 +347,8 @@ async function artists(
     const firstMbid = uuid(string(first.id));
     if (firstMbid) {
       const detail = await upstream(
-        `${MB}artist/${firstMbid}?inc=aliases+url-rels&fmt=json`,
+        "musicbrainz",
+        { operation: "artist-by-id", id: firstMbid },
         headers,
         request,
         context,
@@ -236,6 +381,24 @@ async function artists(
       score: number(item.score, artistMbid ? 100 : 0) / 100
     };
   }).filter((item) => item.id && item.name);
+  const sourceMetadata = new Map<string, SourceAttribution[]>();
+  for (const item of response) {
+    sourceMetadata.set(item.id, [{
+      provider: "musicbrainz",
+      id: item.id,
+      role: "identity",
+      matchedBy: [artistMbid ? "artist_mbid" : "name_search"],
+      fields: [
+        "name",
+        "sortName",
+        "aliases",
+        "country",
+        "type",
+        "identifiers.artistMbid"
+      ],
+      confidence: clampScore(item.score)
+    }]);
+  }
   const firstResult = response[0];
   if (firstResult) {
     if (firstResult.wikidataUrl) {
@@ -248,6 +411,20 @@ async function artists(
       );
       firstResult.avatarUrl = enhancement.avatarUrl;
       firstResult.description = enhancement.description;
+      const fields = [
+        enhancement.avatarUrl ? "avatarUrl" : "",
+        enhancement.description ? "description" : ""
+      ].filter(Boolean);
+      if (fields.length) {
+        sourceMetadata.get(firstResult.id)?.push({
+          provider: "wikidata",
+          id: enhancement.providerId || wikidataEntityId(firstResult.wikidataUrl),
+          role: "enrichment",
+          matchedBy: ["wikidata_relation"],
+          fields,
+          confidence: 1
+        });
+      }
     }
     if (!firstResult.avatarUrl || !firstResult.description) {
       const supplement = await withRequestTimeout(
@@ -262,11 +439,89 @@ async function artists(
           trace
         )
       );
-      firstResult.avatarUrl ||= supplement.avatarUrl;
-      firstResult.description ||= supplement.description;
+      const fields: string[] = [];
+      if (!firstResult.avatarUrl && supplement.avatarUrl) {
+        firstResult.avatarUrl = supplement.avatarUrl;
+        fields.push("avatarUrl");
+      }
+      if (!firstResult.description && supplement.description) {
+        firstResult.description = supplement.description;
+        fields.push("description");
+      }
+      if (fields.length) {
+        sourceMetadata.get(firstResult.id)?.push({
+          provider: "netease",
+          id: supplement.providerId || "",
+          role: "enrichment",
+          matchedBy: ["exact_artist_name"],
+          fields,
+          confidence: 0.9
+        });
+      }
     }
   }
-  return result({ artists: response }, 200, trace, 86_400);
+  const body = { artists: response };
+  Object.defineProperty(body, ARTIST_SOURCES, {
+    value: sourceMetadata,
+    enumerable: false
+  });
+  return result(body, 200, trace, 86_400);
+}
+
+async function artistsV2(
+  params: URLSearchParams,
+  request: GatewayRequest,
+  context: GatewayContext,
+  trace: RequestTrace
+): Promise<GatewayResult> {
+  const parsed = artistQuerySchema.safeParse(queryObject(params));
+  if (!parsed.success) return invalidV2(request.requestId, parsed.error, trace);
+  const legacy = await artists(params, request, context, trace);
+  if (legacy.status !== 200) return legacy;
+  const body = legacy.body as Record<PropertyKey, unknown>;
+  const metadata = body[ARTIST_SOURCES] instanceof Map
+    ? body[ARTIST_SOURCES] as Map<string, SourceAttribution[]>
+    : new Map<string, SourceAttribution[]>();
+  const canonical = array(body, "artists").map((raw) => {
+    const item = object(raw);
+    const artistMbid = string(item.artistMbid);
+    const wikidataUrl = string(item.wikidataUrl);
+    const confidence = clampScore(number(item.score, 0));
+    const id = string(item.id);
+    return {
+      canonicalId: artistMbid
+        ? `artist:mbid:${encodeURIComponent(artistMbid.toLowerCase())}`
+        : `artist:${encodeURIComponent(string(item.provider))}:${encodeURIComponent(id)}`,
+      name: string(item.name),
+      sortName: string(item.sortName),
+      aliases: array(item, "aliases").map(string),
+      country: string(item.country),
+      type: string(item.type),
+      identifiers: {
+        ...(artistMbid ? { artistMbid } : {}),
+        ...(wikidataUrl ? { wikidata: wikidataEntityId(wikidataUrl) } : {})
+      },
+      avatarUrl: string(item.avatarUrl),
+      description: string(item.description),
+      confidence,
+      sources: metadata.get(id) || [{
+        provider: string(item.provider),
+        id,
+        role: "identity" as const,
+        matchedBy: ["provider_result"],
+        fields: ["name"],
+        confidence
+      }]
+    };
+  });
+  for (const artist of canonical) {
+    context.telemetry?.recordIdentityDecision({
+      entity: "artist",
+      decision: artist.sources.length > 1 ? "merged" : "independent",
+      confidence: artist.confidence
+    });
+  }
+  return result(artistResponseSchema.parse({ artists: canonical }), 200, trace, 86_400);
 }
 
 async function lyrics(
@@ -295,18 +550,36 @@ async function lyrics(
   const summary: AttemptSummary = { attempted: 0, reachable: 0 };
   const headers = upstreamHeaders(context);
   const [exact, search] = await Promise.all([
-    upstream(`${LRCLIB}/get?${exactQuery}`, headers, request, context, trace, summary),
-    upstream(`${LRCLIB}/search?${searchQuery}`, headers, request, context, trace, summary)
+    upstream(
+      "lrclib",
+      { operation: "exact", query: exactQuery },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    ),
+    upstream(
+      "lrclib",
+      { operation: "search", query: searchQuery },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    )
   ]);
   if (summary.reachable === 0) return upstreamFailure(request.requestId, trace);
 
-  const records = [
-    ...(exact.kind === "success" ? [exact.data] : []),
-    ...(search.kind === "success" ? array(search.data) : [])
-  ];
-  const selected = records.map(object).find(hasLyrics);
+  const exactSelected = exact.kind === "success" && hasLyrics(object(exact.data))
+    ? object(exact.data)
+    : undefined;
+  const searchSelected = search.kind === "success"
+    ? array(search.data).map(object).find(hasLyrics)
+    : undefined;
+  const selected = exactSelected || searchSelected;
   if (!selected) return result({ lyrics: null }, 200, trace, 3_600);
-  return result({
+  const body = {
     lyrics: {
       provider: "lrclib",
       id: string(selected.id),
@@ -317,7 +590,63 @@ async function lyrics(
       syncedLyrics: string(selected.syncedLyrics),
       plainLyrics: string(selected.plainLyrics)
     }
-  }, 200, trace, 3_600);
+  };
+  Object.defineProperty(body, LYRICS_MATCH, {
+    value: exactSelected ? "exact_metadata" : "search",
+    enumerable: false
+  });
+  return result(body, 200, trace, 3_600);
+}
+
+async function lyricsV2(
+  params: URLSearchParams,
+  request: GatewayRequest,
+  context: GatewayContext,
+  trace: RequestTrace
+): Promise<GatewayResult> {
+  const parsed = lyricsQuerySchema.safeParse(queryObject(params));
+  if (!parsed.success) return invalidV2(request.requestId, parsed.error, trace);
+  const legacy = await lyrics(params, request, context, trace);
+  if (legacy.status !== 200) return legacy;
+  const body = legacy.body as Record<PropertyKey, unknown>;
+  const rawLyrics = object(body.lyrics);
+  if (!Object.keys(rawLyrics).length) {
+    return result(lyricsResponseSchema.parse({ lyrics: null }), 200, trace, 3_600);
+  }
+  const id = string(rawLyrics.id);
+  const match = typeof body[LYRICS_MATCH] === "string" ? String(body[LYRICS_MATCH]) : "search";
+  const confidence = match === "exact_metadata" ? 1 : 0.8;
+  const canonical = {
+    canonicalId: `lyrics:${encodeURIComponent(string(rawLyrics.provider))}:${encodeURIComponent(id)}`,
+    title: string(rawLyrics.title),
+    artist: string(rawLyrics.artist),
+    album: string(rawLyrics.album),
+    durationMs: Math.max(0, Math.round(number(rawLyrics.durationMs, 0))),
+    syncedLyrics: string(rawLyrics.syncedLyrics),
+    plainLyrics: string(rawLyrics.plainLyrics),
+    confidence,
+    sources: [{
+      provider: string(rawLyrics.provider),
+      id,
+      role: "identity" as const,
+      matchedBy: [match],
+      fields: [
+        "title",
+        "artist",
+        "album",
+        "durationMs",
+        "syncedLyrics",
+        "plainLyrics"
+      ],
+      confidence
+    }]
+  };
+  context.telemetry?.recordIdentityDecision({
+    entity: "lyrics",
+    decision: "independent",
+    confidence
+  });
+  return result(lyricsResponseSchema.parse({ lyrics: canonical }), 200, trace, 3_600);
 }
 
 async function wikidataArtistProfile(
@@ -339,7 +668,14 @@ async function wikidataArtistProfile(
     format: "json",
     formatversion: "2"
   });
-  const response = await upstream(`${WIKIDATA_API}?${query}`, headers, request, context, trace);
+  const response = await upstream(
+    "wikidata",
+    { query },
+    headers,
+    request,
+    context,
+    trace
+  );
   if (response.kind !== "success") return emptyArtistProfile();
   const body = object(response.data);
   const entity = object(object(body.entities)[entityId]);
@@ -350,7 +686,8 @@ async function wikidataArtistProfile(
     avatarUrl: fileName
       ? `https://commons.wikimedia.org/wiki/Special:Redirect/file/${encodeURIComponent(fileName)}?width=512`
       : "",
-    description: wikidataDescription(entity)
+    description: wikidataDescription(entity),
+    providerId: entityId
   };
 }
 
@@ -364,7 +701,7 @@ function wikidataDescription(entity: Record<string, unknown>): string {
 }
 
 function emptyArtistProfile(): ArtistProfileEnhancement {
-  return { avatarUrl: "", description: "" };
+  return { avatarUrl: "", description: "", providerId: "" };
 }
 
 async function withRequestTimeout<T>(
@@ -401,26 +738,37 @@ async function neteaseArtistProfile(
     total: "true"
   });
   const headers = neteaseHeaders(context);
-  const search = await upstream(`${NETEASE_SEARCH}?${query}`, headers, request, context, trace);
-  if (search.kind !== "success") return emptyArtistProfile();
-  const body = object(search.data);
-  if (number(body.code, 0) !== 200) return emptyArtistProfile();
-  const match = exactNeteaseArtist(array(object(body.result), "artists"), acceptedNames);
-  if (!match) return emptyArtistProfile();
-  if (!needsDescription) return { avatarUrl: match.avatarUrl, description: "" };
-
-  const detailQuery = new URLSearchParams({ id: match.id });
-  const detail = await upstream(
-    `${NETEASE_ARTIST_INTRODUCTION}?${detailQuery}`,
+  const search = await upstream(
+    "netease",
+    { operation: "artist-search", query },
     headers,
     request,
     context,
     trace
   );
-  if (detail.kind !== "success") return { avatarUrl: match.avatarUrl, description: "" };
+  if (search.kind !== "success") return emptyArtistProfile();
+  const body = object(search.data);
+  if (number(body.code, 0) !== 200) return emptyArtistProfile();
+  const match = exactNeteaseArtist(array(object(body.result), "artists"), acceptedNames);
+  if (!match) return emptyArtistProfile();
+  if (!needsDescription) {
+    return { avatarUrl: match.avatarUrl, description: "", providerId: match.id };
+  }
+
+  const detail = await upstream(
+    "netease",
+    { operation: "artist-introduction", id: match.id },
+    headers,
+    request,
+    context,
+    trace
+  );
+  if (detail.kind !== "success") {
+    return { avatarUrl: match.avatarUrl, description: "", providerId: match.id };
+  }
   const detailBody = object(detail.data);
   if (number(detailBody.code, 0) !== 200) {
-    return { avatarUrl: match.avatarUrl, description: "" };
+    return { avatarUrl: match.avatarUrl, description: "", providerId: match.id };
   }
   const briefDescription = cleanArtistDescription(detailBody.briefDesc);
   const introduction = array(detailBody, "introduction")
@@ -428,7 +776,8 @@ async function neteaseArtistProfile(
     .find(Boolean) || "";
   return {
     avatarUrl: match.avatarUrl,
-    description: briefDescription || introduction
+    description: briefDescription || introduction,
+    providerId: match.id
   };
 }
 
@@ -491,14 +840,15 @@ async function acoustIdLookup(
   trace: RequestTrace,
   summary: AttemptSummary
 ): Promise<RecordingEvidence[]> {
-  const query = new URLSearchParams({
-    client: key,
-    duration: String(duration),
-    fingerprint,
-    meta: "recordings+recordingids+releasegroups+compress",
-    format: "json"
-  });
-  const response = await upstream(`${ACOUSTID}?${query}`, headers, request, context, trace, summary);
+  const response = await upstream(
+    "acoustid",
+    { client: key, duration, fingerprint },
+    headers,
+    request,
+    context,
+    trace,
+    summary
+  );
   if (response.kind !== "success") return [];
   const root = object(response.data);
   if (root.status !== "ok") return [];
@@ -581,9 +931,9 @@ async function itunesLookup(
   trace: RequestTrace,
   summary: AttemptSummary
 ): Promise<RecordingEvidence[]> {
-  const term = [title, artist].filter(Boolean).join(" ");
   const response = await upstream(
-    `${ITUNES}?media=music&entity=song&limit=${limit}&term=${encodeURIComponent(term)}`,
+    "itunes",
+    { title, artist, limit },
     headers,
     request,
     context,
@@ -607,21 +957,58 @@ async function itunesLookup(
 }
 
 async function upstream(
-  url: string,
+  provider: ProviderName,
+  query: unknown,
   headers: Record<string, string>,
   request: GatewayRequest,
   context: GatewayContext,
   trace: RequestTrace,
   summary?: AttemptSummary
 ): Promise<UpstreamJsonResult> {
-  const response = await context.transport.getJson(url, headers, request.signal);
-  trace.cacheHit ||= response.cacheHit;
-  trace.upstream.push({ host: response.host, status: response.status });
-  if (summary) {
-    summary.attempted += 1;
-    if (response.kind !== "failure") summary.reachable += 1;
-  }
-  return response;
+  return providerManagerFor({ transport: context.transport }).search(provider, query, {
+    request,
+    trace,
+    headers,
+    defer: context.defer,
+    telemetry: context.telemetry,
+    summary
+  });
+}
+
+function invalidV2(
+  requestId: string,
+  error: Parameters<typeof validationIssues>[0],
+  trace: RequestTrace
+): GatewayResult {
+  return result({
+    error: "invalid_request",
+    requestId,
+    issues: validationIssues(error)
+  }, 400, trace);
+}
+
+function withV1Deprecation(
+  response: GatewayResult,
+  context: GatewayContext
+): GatewayResult {
+  if (!context.env.v1SunsetDate) return response;
+  return {
+    ...response,
+    headers: {
+      ...response.headers,
+      Deprecation: "true",
+      Sunset: context.env.v1SunsetDate,
+      Link: '</openapi.json>; rel="service-desc"'
+    }
+  };
+}
+
+function wikidataEntityId(value: string): string {
+  return value.match(/\/(Q\d+)(?:[/?#]|$)/iu)?.[1]?.toUpperCase() || "";
+}
+
+function clampScore(value: number): number {
+  return Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
 }
 
 function dedupeRecordings(values: RecordingEvidence[]): RecordingEvidence[] {

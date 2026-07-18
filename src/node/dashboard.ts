@@ -20,6 +20,8 @@ import {
   WorkQueueBusyError
 } from "./dashboard-security.js";
 import { DashboardStore, type SessionRecord } from "./dashboard-store.js";
+import type { DashboardStoreAdapter } from "./dashboard-store-adapter.js";
+import { PostgresDashboardStore } from "./postgres-dashboard-store.js";
 import { dashboardPage, loginPage, setupPage } from "./dashboard-ui.js";
 
 const EMPTY_TRACE: RequestTrace = { cacheHit: false, upstream: [] };
@@ -35,6 +37,8 @@ export interface DashboardConfig {
   sessionAbsoluteMs: number;
   retentionDays: number;
   scryptLogN?: number;
+  backend?: "sqlite" | "external";
+  databaseUrl?: string;
 }
 
 export interface DashboardResponse {
@@ -45,27 +49,39 @@ export interface DashboardResponse {
 }
 
 export class Dashboard {
-  private readonly store: DashboardStore;
+  private readonly store: DashboardStoreAdapter;
   private readonly metrics: DashboardMetrics;
   private readonly setupLimiter = new AttemptLimiter(5, 15 * 60_000);
   private readonly loginLimiter = new AttemptLimiter(8, 15 * 60_000);
   private readonly passwordGate = new AsyncGate(2);
   private readonly mascot: Buffer;
   private readonly paperBackground: Buffer;
+  private readonly initialization: Promise<void>;
   private setupToken?: string;
 
   constructor(
     private readonly config: DashboardConfig,
     cacheStats: () => { entries: number; maxEntries: number }
   ) {
-    this.store = new DashboardStore({
-      path: config.dbPath,
-      sessionIdleMs: config.sessionIdleMs,
-      sessionAbsoluteMs: config.sessionAbsoluteMs,
-      metricsRetentionMs: config.retentionDays * 24 * 60 * 60_000
+    this.store = config.backend === "external"
+      ? new PostgresDashboardStore({
+          url: requiredDatabaseUrl(config),
+          sessionIdleMs: config.sessionIdleMs,
+          sessionAbsoluteMs: config.sessionAbsoluteMs,
+          metricsRetentionMs: config.retentionDays * 24 * 60 * 60_000
+        })
+      : new DashboardStore({
+          path: config.dbPath,
+          sessionIdleMs: config.sessionIdleMs,
+          sessionAbsoluteMs: config.sessionAbsoluteMs,
+          metricsRetentionMs: config.retentionDays * 24 * 60 * 60_000
     });
     try {
-      if (!this.store.hasAdmin() && !config.setupToken) {
+      if (
+        this.store instanceof DashboardStore
+        && !this.store.hasAdmin()
+        && !config.setupToken
+      ) {
         throw new Error("dashboard_setup_token_required");
       }
       this.setupToken = config.setupToken;
@@ -75,9 +91,19 @@ export class Dashboard {
         retentionDays: config.retentionDays,
         cacheStats
       });
+      this.initialization = this.initialize();
     } catch (error) {
-      this.store.close();
+      void this.store.close();
       throw error;
+    }
+  }
+
+  async ready(): Promise<boolean> {
+    try {
+      await this.initialization;
+      return await this.store.ready?.() ?? true;
+    } catch {
+      return false;
     }
   }
 
@@ -88,6 +114,7 @@ export class Dashboard {
     clientIp: string
   ): Promise<DashboardResponse | null> {
     if (!url.pathname.startsWith("/admin")) return null;
+    await this.initialization;
     const method = request.method || "GET";
 
     if (method === "GET" && url.pathname === "/admin/assets/gateway-mascot.png") {
@@ -98,19 +125,19 @@ export class Dashboard {
     }
 
     if (method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
-      if (!this.store.hasAdmin()) return redirect("/admin/setup");
-      const session = this.session(request);
+      if (!await this.store.hasAdmin()) return redirect("/admin/setup");
+      const session = await this.session(request);
       if (!session) return redirect("/admin/login");
       return html(dashboardPage(randomToken(18)));
     }
     if (method === "GET" && url.pathname === "/admin/setup") {
-      return this.store.hasAdmin()
+      return await this.store.hasAdmin()
         ? redirect("/admin/login")
         : html(setupPage(randomToken(18)));
     }
     if (method === "GET" && url.pathname === "/admin/login") {
-      if (!this.store.hasAdmin()) return redirect("/admin/setup");
-      return this.session(request)
+      if (!await this.store.hasAdmin()) return redirect("/admin/setup");
+      return await this.session(request)
         ? redirect("/admin")
         : html(loginPage(randomToken(18)));
     }
@@ -139,9 +166,9 @@ export class Dashboard {
     this.metrics.record(route, status, durationMs, trace, now);
   }
 
-  close(): void {
-    this.metrics.close();
-    this.store.close();
+  async close(): Promise<void> {
+    await this.metrics.close();
+    await this.store.close();
   }
 
   private async setup(
@@ -149,7 +176,9 @@ export class Dashboard {
     requestId: string,
     clientIp: string
   ): Promise<DashboardResponse> {
-    if (this.store.hasAdmin()) return json(409, { error: "setup_complete", requestId });
+    if (await this.store.hasAdmin()) {
+      return json(409, { error: "setup_complete", requestId });
+    }
     const originError = this.checkOrigin(request, requestId);
     if (originError) return originError;
     const rate = this.setupLimiter.check(clientIp);
@@ -180,7 +209,7 @@ export class Dashboard {
       if (error instanceof WorkQueueBusyError) return busy(requestId);
       throw error;
     }
-    if (!this.store.createAdmin(username, passwordHash, Date.now())) {
+    if (!await this.store.createAdmin(username, passwordHash, Date.now())) {
       return json(409, { error: "setup_complete", requestId });
     }
     this.setupToken = undefined;
@@ -193,7 +222,9 @@ export class Dashboard {
     requestId: string,
     clientIp: string
   ): Promise<DashboardResponse> {
-    if (!this.store.hasAdmin()) return json(409, { error: "setup_required", requestId });
+    if (!await this.store.hasAdmin()) {
+      return json(409, { error: "setup_required", requestId });
+    }
     const originError = this.checkOrigin(request, requestId);
     if (originError) return originError;
     const rate = this.loginLimiter.check(clientIp);
@@ -203,7 +234,7 @@ export class Dashboard {
     if ("response" in parsed) return parsed.response;
     const username = normalizeUsername(parsed.body.username);
     const password = validatePassword(parsed.body.password);
-    const admin = this.store.getAdmin();
+    const admin = await this.store.getAdmin();
     if (!username || !password || !admin) {
       return json(401, { error: "invalid_credentials", requestId });
     }
@@ -222,7 +253,7 @@ export class Dashboard {
 
     const token = randomToken();
     const csrfToken = randomToken();
-    this.store.createSession({
+    await this.store.createSession({
       tokenHash: hashToken(token),
       csrfToken,
       sessionVersion: admin.sessionVersion,
@@ -237,38 +268,41 @@ export class Dashboard {
     return response;
   }
 
-  private snapshot(
+  private async snapshot(
     request: IncomingMessage,
     url: URL,
     requestId: string
-  ): DashboardResponse {
-    const session = this.session(request);
+  ): Promise<DashboardResponse> {
+    const session = await this.session(request);
     if (!session) return json(401, { error: "authentication_required", requestId });
     const requestedWindow = url.searchParams.get("window") || "1h";
     const window = WINDOWS.has(requestedWindow as DashboardWindow)
       ? requestedWindow as DashboardWindow
       : "1h";
     return json(200, {
-      ...this.metrics.snapshot(window),
+      ...await this.metrics.snapshot(window),
       csrfToken: session.csrfToken
     });
   }
 
-  private logout(request: IncomingMessage, requestId: string): DashboardResponse {
+  private async logout(
+    request: IncomingMessage,
+    requestId: string
+  ): Promise<DashboardResponse> {
     const originError = this.checkOrigin(request, requestId);
     if (originError) return originError;
-    const session = this.session(request);
+    const session = await this.session(request);
     const suppliedCsrf = header(request, "x-csrf-token");
     if (!session || !suppliedCsrf || !safeTextEqual(suppliedCsrf, session.csrfToken)) {
       return json(403, { error: "forbidden", requestId });
     }
-    this.store.revokeSession(session.tokenHash, Date.now());
+    await this.store.revokeSession(session.tokenHash, Date.now());
     const response = json(200, { ok: true });
     response.headers["Set-Cookie"] = clearSessionCookie();
     return response;
   }
 
-  private session(request: IncomingMessage): SessionRecord | null {
+  private async session(request: IncomingMessage): Promise<SessionRecord | null> {
     const token = parseCookies(header(request, "cookie")).get(SESSION_COOKIE_NAME);
     if (!token || token.length > 128) return null;
     return this.store.resolveSession(hashToken(token), Date.now());
@@ -283,6 +317,18 @@ export class Dashboard {
       ? null
       : json(403, { error: "forbidden", requestId });
   }
+
+  private async initialize(): Promise<void> {
+    if (this.store instanceof PostgresDashboardStore) await this.store.initialize();
+    if (!await this.store.hasAdmin() && !this.config.setupToken) {
+      throw new Error("dashboard_setup_token_required");
+    }
+  }
+}
+
+function requiredDatabaseUrl(config: DashboardConfig): string {
+  if (!config.databaseUrl) throw new Error("dashboard_database_url_required");
+  return config.databaseUrl;
 }
 
 function header(request: IncomingMessage, name: string): string | undefined {

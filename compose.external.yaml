@@ -1,0 +1,93 @@
+services:
+  metadata-gateway-external:
+    image: ghcr.io/ysyhlly/yukine-metadata-gateway:${GATEWAY_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["external"]
+    restart: unless-stopped
+    expose:
+      - "8787"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      STATE_BACKEND: "external"
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgres://yukine:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/yukine"
+      CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-3600}"
+      CACHE_STALE_SECONDS: "${CACHE_STALE_SECONDS:-86400}"
+      CACHE_MAX_ENTRIES: "${CACHE_MAX_ENTRIES:-10000}"
+      MEMORY_CACHE_MAX_ENTRIES: "${MEMORY_CACHE_MAX_ENTRIES:-1000}"
+      UPSTREAM_TIMEOUT_MS: "${UPSTREAM_TIMEOUT_MS:-4500}"
+      REQUEST_TIMEOUT_MS: "${REQUEST_TIMEOUT_MS:-10000}"
+      MAX_CONCURRENT_REQUESTS: "${MAX_CONCURRENT_REQUESTS:-500}"
+      MAX_REQUESTS_PER_SECOND: "${MAX_REQUESTS_PER_SECOND:-500}"
+      TRUST_PROXY: "${TRUST_PROXY:-true}"
+      APP_USER_AGENT: "${APP_USER_AGENT:-Yukine-Metadata-Gateway/2.0 (https://github.com/ysyhlly/yukine-metadata-gateway)}"
+      ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
+      DASHBOARD_ENABLED: "${DASHBOARD_ENABLED:-true}"
+      DASHBOARD_PUBLIC_ORIGIN: "${DASHBOARD_PUBLIC_ORIGIN:-https://metadata.example.com}"
+      DASHBOARD_SETUP_TOKEN: "${DASHBOARD_SETUP_TOKEN:-}"
+      DASHBOARD_SESSION_IDLE_SECONDS: "${DASHBOARD_SESSION_IDLE_SECONDS:-1800}"
+      DASHBOARD_SESSION_ABSOLUTE_SECONDS: "${DASHBOARD_SESSION_ABSOLUTE_SECONDS:-28800}"
+      DASHBOARD_METRICS_RETENTION_DAYS: "${DASHBOARD_METRICS_RETENTION_DAYS:-30}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_SERVICE_NAME: "${OTEL_SERVICE_NAME:-yukine-metadata-gateway}"
+      V2_ENABLED: "${V2_ENABLED:-true}"
+      V1_SUNSET_DATE: "${V1_SUNSET_DATE:-}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  redis:
+    image: redis:8.2-alpine
+    profiles: ["external"]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - metadata-gateway-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:18-alpine
+    profiles: ["external"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "yukine"
+      POSTGRES_USER: "yukine"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+    volumes:
+      - metadata-gateway-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yukine -d yukine"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  metadata-gateway-redis:
+  metadata-gateway-postgres:

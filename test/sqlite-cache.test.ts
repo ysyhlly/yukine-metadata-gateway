@@ -16,7 +16,8 @@ test("SQLite cache persists across reopen and stores only SHA-256 request keys",
   cache.close();
 
   const reopened = new SqliteJsonCache({ path, ttlSeconds: 3_600, maxEntries: 10_000 });
-  assert.equal(reopened.get(secretUrl, now + 1_000), JSON.stringify({ ok: true }));
+  assert.equal(reopened.get(secretUrl, now + 1_000)?.body, JSON.stringify({ ok: true }));
+  assert.equal(reopened.get(secretUrl, now + 1_000)?.freshness, "fresh");
   reopened.close();
 
   const databaseBytes = readFileSync(path).toString("latin1");
@@ -34,10 +35,18 @@ test("SQLite cache persists across reopen and stores only SHA-256 request keys",
 test("SQLite cache honors TTL and cleans expired rows on reopen", async (context) => {
   const directory = await temporaryDirectory(context);
   const path = join(directory, "cache.sqlite");
-  const cache = new SqliteJsonCache({ path, ttlSeconds: 1, maxEntries: 10 });
+  const cache = new SqliteJsonCache({
+    path,
+    ttlSeconds: 1,
+    staleSeconds: 1,
+    maxEntries: 10
+  });
   cache.put("https://example.com/old", "{}", 1_000);
-  assert.equal(cache.get("https://example.com/old", 1_999), "{}");
-  assert.equal(cache.get("https://example.com/old", 2_000), null);
+  assert.equal(cache.get("https://example.com/old", 1_999)?.body, "{}");
+  assert.equal(cache.get("https://example.com/old", 1_999)?.freshness, "fresh");
+  assert.equal(cache.get("https://example.com/old", 2_000)?.freshness, "stale");
+  assert.equal(cache.get("https://example.com/old", 2_999)?.body, "{}");
+  assert.equal(cache.get("https://example.com/old", 3_000), null);
   cache.close();
 
   const reopened = new SqliteJsonCache({ path, ttlSeconds: 1, maxEntries: 10 });
@@ -57,8 +66,8 @@ test("SQLite cache evicts least recently used rows every 100 writes", async (con
   }
 
   assert.equal(cache.get("https://example.com/0", 2_000), null);
-  assert.equal(cache.get("https://example.com/98", 2_000), JSON.stringify({ index: 98 }));
-  assert.equal(cache.get("https://example.com/99", 2_000), JSON.stringify({ index: 99 }));
+  assert.equal(cache.get("https://example.com/98", 2_000)?.body, JSON.stringify({ index: 98 }));
+  assert.equal(cache.get("https://example.com/99", 2_000)?.body, JSON.stringify({ index: 99 }));
   cache.close();
 });
 
