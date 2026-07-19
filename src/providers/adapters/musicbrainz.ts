@@ -1,6 +1,9 @@
 import {
   musicBrainzArtistById,
   musicBrainzArtistSearch,
+  musicBrainzReleaseById,
+  musicBrainzReleaseGroupById,
+  musicBrainzReleaseGroupSearch,
   musicBrainzRecordingById,
   musicBrainzRecordingSearch,
   musicBrainzRecordingsByIsrc
@@ -13,6 +16,9 @@ import type { UpstreamJsonResult } from "../../types.js";
 import {
   musicBrainzArtistListSchema,
   musicBrainzArtistSchema,
+  musicBrainzReleaseGroupListSchema,
+  musicBrainzReleaseGroupSchema,
+  musicBrainzReleaseSchema,
   musicBrainzRecordingListSchema,
   musicBrainzRecordingSchema
 } from "../../contracts/upstream.js";
@@ -23,12 +29,15 @@ export type MusicBrainzQuery =
   | { operation: "recordings-by-isrc"; isrc: string }
   | { operation: "recording-search"; clauses: string[]; limit: number }
   | { operation: "artist-by-id"; id: string }
-  | { operation: "artist-search"; query: string; limit: number };
+  | { operation: "artist-search"; query: string; limit: number }
+  | { operation: "release-group-by-id"; id: string }
+  | { operation: "release-by-id"; id: string }
+  | { operation: "release-group-search"; clauses: string[]; limit: number };
 
 export class MusicBrainzProvider
 implements MetadataProvider<MusicBrainzQuery, UpstreamJsonResult> {
   readonly name = "musicbrainz" as const;
-  readonly capabilities = ["recording-search", "artist-search"] as const;
+  readonly capabilities = ["recording-search", "artist-search", "album-search"] as const;
 
   async search(
     query: MusicBrainzQuery,
@@ -57,6 +66,18 @@ implements MetadataProvider<MusicBrainzQuery, UpstreamJsonResult> {
           musicBrainzArtistSearch(query.query, query.limit)
         );
         return validateUpstream(response, musicBrainzArtistListSchema);
+      case "release-group-by-id":
+        response = await context.requestJson(this.name, musicBrainzReleaseGroupById(query.id));
+        return validateUpstream(response, musicBrainzReleaseGroupSchema);
+      case "release-by-id":
+        response = await context.requestJson(this.name, musicBrainzReleaseById(query.id));
+        return validateUpstream(response, musicBrainzReleaseSchema);
+      case "release-group-search":
+        response = await context.requestJson(
+          this.name,
+          musicBrainzReleaseGroupSearch(query.clauses, query.limit)
+        );
+        return validateUpstream(response, musicBrainzReleaseGroupListSchema);
     }
   }
 }

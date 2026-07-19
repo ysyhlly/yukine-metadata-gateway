@@ -6,6 +6,8 @@ import type {
   UpstreamJsonResult
 } from "./types.js";
 import {
+  albumQuerySchema,
+  albumResponseSchema,
   artistQuerySchema,
   artistResponseSchema,
   lyricsQuerySchema,
@@ -20,6 +22,11 @@ import {
   resolveCanonicalRecordings,
   type SourceAttribution
 } from "./identity/recording.js";
+import {
+  canonicalizeMusicBrainzRelease,
+  canonicalizeMusicBrainzReleaseGroups,
+  type CanonicalAlbum
+} from "./identity/album.js";
 import { providerManagerFor } from "./providers/manager.js";
 import type { AttemptSummary, ProviderName } from "./providers/types.js";
 
@@ -110,6 +117,9 @@ export async function handleGatewayRequest(
     }
     if (context.env.v2Enabled !== false && url.pathname === "/v2/artists/search") {
       return artistsV2(url.searchParams, request, context, trace);
+    }
+    if (context.env.v2Enabled !== false && url.pathname === "/v2/albums/search") {
+      return albumsV2(url.searchParams, request, context, trace);
     }
     if (context.env.v2Enabled !== false && url.pathname === "/v2/lyrics/search") {
       return lyricsV2(url.searchParams, request, context, trace);
@@ -303,6 +313,87 @@ async function recordingsV2(
     });
   }
   const body = recordingResponseSchema.parse({ recordings: canonical });
+  return result(body, 200, trace, 86_400);
+}
+
+async function albumsV2(
+  params: URLSearchParams,
+  request: GatewayRequest,
+  context: GatewayContext,
+  trace: RequestTrace
+): Promise<GatewayResult> {
+  const parsed = albumQuerySchema.safeParse(queryObject(params));
+  if (!parsed.success) return invalidV2(request.requestId, parsed.error, trace);
+  const query = parsed.data;
+  const headers = upstreamHeaders(context);
+  const summary: AttemptSummary = { attempted: 0, reachable: 0 };
+  let albums: CanonicalAlbum[] = [];
+
+  if (query.releaseMbid) {
+    const response = await upstream(
+      "musicbrainz",
+      { operation: "release-by-id", id: query.releaseMbid },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    );
+    if (response.kind === "success") {
+      const returnedReleaseMbid = string(object(response.data).id).toLowerCase();
+      if (returnedReleaseMbid === query.releaseMbid) {
+        albums = canonicalizeMusicBrainzRelease(response.data, query.releaseGroupMbid);
+      }
+    }
+  } else if (query.releaseGroupMbid) {
+    const response = await upstream(
+      "musicbrainz",
+      { operation: "release-group-by-id", id: query.releaseGroupMbid },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    );
+    if (response.kind === "success") {
+      albums = canonicalizeMusicBrainzReleaseGroups([response.data], {
+        exact: true,
+        limit: query.limit
+      });
+    }
+  } else if (query.title) {
+    const clauses = [`releasegroup:"${escapeLucene(query.title)}"`];
+    if (query.artist) clauses.push(`artist:"${escapeLucene(query.artist)}"`);
+    if (query.year) clauses.push(`firstreleasedate:${query.year}*`);
+    if (query.type) clauses.push(`primarytype:"${escapeLucene(query.type)}"`);
+    const response = await upstream(
+      "musicbrainz",
+      { operation: "release-group-search", clauses, limit: query.limit },
+      headers,
+      request,
+      context,
+      trace,
+      summary
+    );
+    if (response.kind === "success") {
+      albums = canonicalizeMusicBrainzReleaseGroups(
+        array(response.data, "release-groups"),
+        { exact: false, limit: query.limit }
+      );
+    }
+  }
+
+  if (albums.length === 0 && summary.attempted > 0 && summary.reachable === 0) {
+    return upstreamFailure(request.requestId, trace);
+  }
+  for (const album of albums) {
+    context.telemetry?.recordIdentityDecision({
+      entity: "album",
+      decision: "independent",
+      confidence: album.confidence
+    });
+  }
+  const body = albumResponseSchema.parse({ albums });
   return result(body, 200, trace, 86_400);
 }
 

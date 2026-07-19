@@ -58,5 +58,124 @@ services:
       start_period: 10s
       retries: 3
 
+  metadata-gateway-authorized:
+    profiles: ["cloud-test"]
+    image: ghcr.io/ysyhlly/yukine-metadata-gateway:${GATEWAY_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8787"
+    environment:
+      NODE_ENV: "test"
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      CACHE_DB_PATH: "/data/metadata-cache.sqlite"
+      CACHE_TTL_SECONDS: "3600"
+      CACHE_STALE_SECONDS: "86400"
+      CACHE_MAX_ENTRIES: "10000"
+      MEMORY_CACHE_MAX_ENTRIES: "1000"
+      UPSTREAM_TIMEOUT_MS: "4500"
+      REQUEST_TIMEOUT_MS: "10000"
+      MAX_CONCURRENT_REQUESTS: "100"
+      MAX_REQUESTS_PER_SECOND: "100"
+      STATE_BACKEND: "sqlite"
+      DASHBOARD_ENABLED: "true"
+      DASHBOARD_DB_PATH: "/data/dashboard.sqlite"
+      DASHBOARD_PUBLIC_ORIGIN: "http://localhost:8788"
+      DASHBOARD_SETUP_TOKEN_FILE: "/run/secrets/dashboard-setup-token"
+      AUTHORIZATION_ENABLED: "true"
+      AUTHORIZATION_ISSUER_ID: "official-local"
+      AUTHORIZATION_KEY_ID: "local-1"
+      AUTHORIZATION_PRIVATE_KEY_FILE: "/run/secrets/gateway-signing-private.pem"
+      AUTHORIZATION_CREDENTIAL_PEPPER_FILE: "/run/secrets/gateway-credential-pepper"
+      AUTHORIZATION_PUBLIC_ORIGIN: "http://metadata-gateway-authorized:8787"
+      AUTHORIZATION_ALLOW_INSECURE_TEST: "true"
+      AUTHORIZATION_DB_PATH: "/data/authorization.sqlite"
+    volumes:
+      - metadata-gateway-authorized-data:/data
+      - ./secrets/dashboard-setup-token:/run/secrets/dashboard-setup-token:ro
+      - ./secrets/gateway-signing-private.pem:/run/secrets/gateway-signing-private.pem:ro
+      - ./secrets/gateway-credential-pepper:/run/secrets/gateway-credential-pepper:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+  cloud-postgres:
+    profiles: ["cloud-test"]
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: "yukine_cloud"
+      POSTGRES_USER: "yukine_cloud"
+      POSTGRES_PASSWORD: "local-cloud-test-only"
+    volumes:
+      - yukine-cloud-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yukine_cloud -d yukine_cloud"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cloud-redis:
+    profiles: ["cloud-test"]
+    image: redis:8.2-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  yukine-cloud:
+    profiles: ["cloud-test"]
+    image: ghcr.io/ysyhlly/yukine-cloud:${CLOUD_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.yukine-cloud
+    depends_on:
+      metadata-gateway-authorized:
+        condition: service_healthy
+      cloud-postgres:
+        condition: service_healthy
+      cloud-redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      NODE_ENV: "test"
+      CLOUD_TEST_CONTAINER: "true"
+      HOST: "0.0.0.0"
+      PORT: "8790"
+      DATABASE_URL: "postgres://yukine_cloud:local-cloud-test-only@cloud-postgres:5432/yukine_cloud"
+      REDIS_URL: "redis://cloud-redis:6379/0"
+      CLOUD_KEK_FILE: "/run/secrets/cloud-kek"
+      CLOUD_KEK_KEY_ID: "local-v1"
+      CLOUD_TRUSTED_ISSUER_SEED_FILE: "/run/secrets/trusted-issuer.local.json"
+    volumes:
+      - ./secrets/cloud-kek:/run/secrets/cloud-kek:ro
+      - ./secrets/trusted-issuer.local.json:/run/secrets/trusted-issuer.local.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   metadata-gateway-data:
+  metadata-gateway-authorized-data:
+  yukine-cloud-postgres-data:

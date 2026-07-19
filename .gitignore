@@ -9,3 +9,4 @@ data/
 .env
 tmp/
 artifacts/
+secrets/

@@ -18,6 +18,23 @@ export const musicBrainzArtistListSchema = z.looseObject({
   artists: z.array(looseObject)
 });
 
+const musicBrainzReleaseGroupItemSchema = z.looseObject({
+  id: z.uuid(),
+  title: z.string()
+});
+
+export const musicBrainzReleaseGroupSchema = musicBrainzReleaseGroupItemSchema;
+
+export const musicBrainzReleaseGroupListSchema = z.looseObject({
+  "release-groups": z.array(musicBrainzReleaseGroupItemSchema)
+});
+
+export const musicBrainzReleaseSchema = z.looseObject({
+  id: z.uuid(),
+  title: z.string(),
+  "release-group": musicBrainzReleaseGroupItemSchema
+});
+
 export const acoustIdResponseSchema = z.looseObject({
   status: z.string(),
   results: z.array(looseObject).optional()

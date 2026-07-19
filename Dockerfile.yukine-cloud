@@ -1,31 +1,28 @@
 FROM node:24.18.0-bookworm-slim AS build
 
 WORKDIR /app
-COPY package.json package-lock.json tsconfig.json tsconfig.node.json ./
+COPY package.json package-lock.json tsconfig.json ./
 COPY packages/authorization-contract/package.json ./packages/authorization-contract/package.json
-COPY yukine-cloud/package.json ./yukine-cloud/package.json
+COPY yukine-cloud/package.json yukine-cloud/tsconfig.json ./yukine-cloud/
 RUN npm ci
 COPY packages/authorization-contract ./packages/authorization-contract
-COPY src ./src
-RUN npm run build:node
+COPY yukine-cloud/src ./yukine-cloud/src
+RUN npm run build:contract && npm run build:cloud
 
 FROM node:24.18.0-bookworm-slim AS runtime
 
-ENV NODE_ENV=production
+ENV NODE_ENV=test
 WORKDIR /app
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/packages/authorization-contract/dist ./packages/authorization-contract/dist
-COPY assets ./assets
 COPY package.json package-lock.json ./
 COPY packages/authorization-contract/package.json ./packages/authorization-contract/package.json
 COPY yukine-cloud/package.json ./yukine-cloud/package.json
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
-RUN mkdir -p /data && chown node:node /data
+COPY --from=build /app/packages/authorization-contract/dist ./packages/authorization-contract/dist
+COPY --from=build /app/yukine-cloud/dist ./yukine-cloud/dist
 
 USER node
-EXPOSE 8787
-VOLUME ["/data"]
+EXPOSE 8790
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:8787/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+  CMD ["node", "-e", "fetch('http://127.0.0.1:8790/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
 
-CMD ["node", "dist/node/server.js"]
+CMD ["node", "yukine-cloud/dist/test-host.js"]

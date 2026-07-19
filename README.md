@@ -12,17 +12,68 @@
 - `GET /v1/lyrics/search`
 - `GET /v2/recordings/search`
 - `GET /v2/artists/search`
+- `GET /v2/albums/search`
 - `GET /v2/lyrics/search`
+- `POST /v1/authorization/verify`（仅 Node 可信发行模式）
+- `POST /v1/authorization/redeem/{token}`（仅 Node 可信发行模式）
+- `POST /v1/authorization/activate`（仅 Node 可信发行模式）
 
 `/health` 只表示进程存活，不会探测音乐来源；`/ready` 只检查运行时初始化和所选状态后端。OpenAPI 3.1 由同一套 Zod 4 请求/响应 schema 在构建时生成，Node 与 Worker 都从 `/openapi.json` 提供。
 
 v2 对非法参数严格返回 `400 invalid_request`，只列字段名和错误码。每个实体均包含 `canonicalId`、`confidence` 和逐字段 `sources`；录音标识统一收敛到 `identifiers`。文本录音搜索并发收集 MusicBrainz 与 iTunes，强 MBID、ISRC 或已验证 AcoustID 证据优先；版本标记冲突和强标识冲突不会自动合并。v1 的字段、宽松参数解析和错误语义保持不变。
+
+专辑接口接受 `title`、`artist`、`releaseGroupMbid`、`releaseMbid`、`year`、`type` 和 `limit`，默认最多返回 10 个 MusicBrainz release-group 候选。强 MBID 优先于文本上下文；两个 MBID 归属冲突时返回空数组。候选按 `confidence` 降序排列，平分时按 `canonicalId` 稳定排序；无结果返回 `{"albums":[]}`。
 
 录音接口的 `coverUrl` 只会返回 MusicBrainz 已声明 front artwork 的 Cover Art Archive URL，或 HTTPS `*.mzstatic.com` iTunes 图片。歌词接口接受必填 `title`，以及可选 `artist`、`album`、`durationMs`；无结果返回 `{"lyrics":null}`。
 
 艺人接口的每个 `artists[]` 都包含 `avatarUrl` 和 `description` 字符串。首个匹配结果会优先通过 MusicBrainz 关联的 Wikidata 实体增强：头像读取 `P18`，介绍优先使用简体中文或中文描述，缺失时回退英文。头像或介绍仍为空时，网关会匿名查询网易云官方域名，只有精确匹配艺人名称后才逐字段补齐；图片只接受 HTTPS `*.music.126.net`，不会代理图片字节。没有可信内容时相应字段为空字符串。
 
 网易云仅用于艺人头像和介绍的 best-effort 补充，整段补充请求共用 2.5 秒期限；网关不接收或保存网易云 Cookie，也不迁移网易云歌词、播放、歌单或登录接口。所有基础查询均失败时返回 `502 upstream_failure`。已知 404、合法空结果和头像、介绍、封面等附加增强失败不会把基础结果升级为 502。
+
+## 可信远端授权
+
+Node 运行时可以显式启用 `yukine-auth/v1` 可信发行模式。默认保持关闭；关闭时当前元数据 API 的自建网关行为不变，Cloudflare Worker 也继续作为普通自建网关，不能登记为可信授权源。
+
+启用后：
+
+- `/v1/*`、`/v2/*` 元数据搜索必须提交 `Authorization: Bearer <API Key>`，并要求 `official_metadata_gateway` capability；
+- `/health`、`/ready`、`/openapi.json` 和 `/admin` 保持独立；
+- 管理面板新增“远端授权”页，可创建稳定 subject、选择 `official_metadata_gateway` / `together_listening`、设置到期时间、发行 API Key 或一次性兑换 URL，并吊销已有 Key；
+- API Key、兑换 token 和激活 token 均使用至少 32 字节随机 secret。数据库只保存带服务端 pepper 的 HMAC-SHA-256 摘要与 16 字符指纹；明文只在创建或兑换成功时返回一次；
+- 授权断言使用 Ed25519 签名。签名数据为 `yukine-auth/v1\n` 加移除 `signature` 后的 RFC 8785 JCS JSON；Cloud 固定 `issuerId + keyId + 公钥`，不在请求期间下载公钥；
+- nonce 必须是 32 字节 base64url，成功使用后保留 15 分钟；重复 nonce 返回 `409 nonce_replay`。所有授权响应均为 `Cache-Control: no-store`。
+
+验证请求：
+
+```json
+{
+  "protocolVersion": "yukine-auth/v1",
+  "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "requestedCapabilities": ["together_listening"]
+}
+```
+
+签名响应：
+
+```json
+{
+  "protocolVersion": "yukine-auth/v1",
+  "issuerId": "official-production",
+  "subject": "sub_immutable-id",
+  "active": true,
+  "capabilities": ["official_metadata_gateway", "together_listening"],
+  "issuedAt": "2026-07-19T00:00:00.000Z",
+  "expiresAt": "2026-08-19T00:00:00.000Z",
+  "nonce": "request-nonce",
+  "signature": {
+    "algorithm": "Ed25519",
+    "keyId": "signing-2026-07",
+    "value": "base64url-signature"
+  }
+}
+```
+
+一次性 URL 由 YUKINE Cloud 调用。网关先返回 pending API Key 和 60 秒激活 token；Cloud 预留 `(issuerId, subject)` 唯一绑定并加密保存 Key，随后调用 `/activate`。只有激活与 Cloud 绑定都成功，Key 才会返回当前设备。重复兑换返回 `410 redemption_used`。
 
 ## 本地检查
 
@@ -33,10 +84,13 @@ npm ci
 npm run check
 npm test
 npm run build:node
+npm run build:cloud
 npm run dry-run
 ```
 
 `npm run test:external` 是 Redis/PostgreSQL 双实例集成测试，需要设置 `TEST_REDIS_URL` 和 `TEST_DATABASE_URL`；CI 会自动启动依赖并执行。
+
+授权纵向闭环测试包含 API Key、一次性 URL、伪造签名、capability、nonce 重放和跨账号 subject 复用。共享协议位于 `packages/authorization-contract/`，Cloud 验证/绑定模块位于 `yukine-cloud/`。
 
 启动 Node 服务（默认不启用管理面板）：
 
@@ -119,6 +173,14 @@ Compose 默认只绑定 `127.0.0.1:8787`，使用命名卷 `metadata-gateway-dat
 - `DASHBOARD_SESSION_IDLE_SECONDS`（默认 1800）
 - `DASHBOARD_SESSION_ABSOLUTE_SECONDS`（默认 28800）
 - `DASHBOARD_METRICS_RETENTION_DAYS`（默认 30）
+- `AUTHORIZATION_ENABLED`（默认 `false`）
+- 可信发行模式必需的 `AUTHORIZATION_ISSUER_ID`、`AUTHORIZATION_KEY_ID`
+- 只读挂载文件 `AUTHORIZATION_PRIVATE_KEY_FILE`（Ed25519 PKCS#8 PEM）
+- 只读挂载文件 `AUTHORIZATION_CREDENTIAL_PEPPER_FILE`（32 字节原始值、64 位 hex 或 43 位 base64url）
+- `AUTHORIZATION_PUBLIC_ORIGIN`（兑换 URL 的固定 origin）
+- `AUTHORIZATION_DB_PATH`（默认与缓存同目录的 `authorization.sqlite`）
+- `DASHBOARD_SETUP_TOKEN_FILE`（可替代环境变量中的初始化令牌）
+- `AUTHORIZATION_ALLOW_INSECURE_TEST` 只在 `NODE_ENV=test` 生效；生产不得开启
 
 ### Redis/PostgreSQL 多实例
 
@@ -140,6 +202,43 @@ npm run migrate:external-state
 ```
 
 迁移工具以源数据库内容摘要记录批次，在事务中写入管理员、请求、Provider、实例心跳和熔断健康历史；重复执行不会重复导入。完成后将反向代理的 readiness 指向 `/ready`，并确认至少两个副本的共享缓存、登录会话和指标汇总。Redis 不执行昂贵键扫描，因此面板只报告共享缓存连接状态，条目数量显示为未知。
+
+授权状态使用独立 SQLite 文件。切换 external PostgreSQL 前停止发行端并执行：
+
+```bash
+AUTHORIZATION_DB_PATH='./data/authorization.sqlite' \
+DATABASE_URL='postgres://yukine:password@127.0.0.1:5432/yukine' \
+npm run migrate:authorization-state
+```
+
+迁移不会复制短期 nonce；subject、Key 摘要、兑换状态、pending 激活与审计会幂等写入。
+
+## YUKINE Cloud 授权模块
+
+`yukine-cloud/` 首版提供框架无关的：
+
+- `bindApiKey`
+- `redeemAndBind`
+- `revalidate`
+- `deleteBinding`
+- `requireCapability`
+
+PostgreSQL 保存可信 issuer、公钥集合和唯一绑定；Redis 保存短期 nonce 与每用户限流。API Key 使用每记录独立 DEK 的 AES-256-GCM 信封加密，DEK 再由只读 32 字节 KEK 文件包装，AAD 包含用户 ID、issuer ID 和绑定版本。
+
+对用户提交的兑换 URL，Cloud 会精确匹配管理员登记的 HTTPS origin、端口和路径前缀，拒绝 userinfo、query token、重定向、环回/私网/链路本地地址和 DNS 重绑定；默认超时 3 秒，响应上限 64 KiB。网关不可达、超时、签名错误、inactive 或缺 capability 时立即拒绝，不读取历史成功结果。
+
+当前没有完整账号 JWT，因此只提供测试宿主。宿主仅在 `NODE_ENV=test` 启动，并通过 `X-Test-User-Id` 模拟未来账号 ID；不得部署为正式账号 API。
+
+本地闭环：
+
+```bash
+npm run generate:authorization-dev-secrets
+docker compose --profile cloud-test up -d --build
+curl http://127.0.0.1:8788/ready
+curl http://127.0.0.1:8790/ready
+```
+
+授权网关面板位于 `http://localhost:8788/admin`。生成的开发密钥位于被 Git 忽略的 `secrets/`；该 profile 使用隔离的授权网关卷、PostgreSQL 和 Redis，只允许本机端口访问。
 
 ### 数据卷备份
 
@@ -182,6 +281,8 @@ npm run deploy
 
 Worker 保持 Cloudflare Cache 和 isolate 内 SingleFlight，通过 `waitUntil()` 执行 stale 后台刷新；不会连接 Redis/PostgreSQL，也不会打包 Node OpenTelemetry SDK。
 
+Worker 首版不实现可信授权发行、凭据管理或 Cloud 绑定协议，因此不能被 YUKINE Cloud 登记为可信 issuer。
+
 ## Android
 
 构建时配置网关：
@@ -200,8 +301,10 @@ Android 会继续使用 Room 响应缓存和端点健康状态：身份元数据
 - TLS 终止及 HTTP 到 HTTPS 跳转；
 - 访问控制（如需要）；
 - 按 IP/令牌限流和并发限制；
-- 业务 API 仅转发 `GET`；只为 `/admin/api/setup`、`/admin/api/login` 和 `/admin/api/logout` 放行 `POST`；
+- 普通自建模式业务 API 仅转发 `GET`；可信发行模式另为 `/v1/authorization/verify`、`/v1/authorization/redeem/*` 和 `/v1/authorization/activate` 放行 `POST`；
+- 管理面板为 `/admin/api/setup`、`/admin/api/login`、`/admin/api/logout` 和 `/admin/api/authorization/*` 放行 `POST`；
 - 对设置和登录接口施加更严格的按 IP 限流，不记录查询串或请求体；
+- 反向代理不得记录 `/v1/authorization/redeem/*` 的原始路径；应用日志会固定写为 `/v1/authorization/redeem/[redacted]`，代理也必须做等价脱敏；
 - 请求体禁用或限制，响应超时略大于网关的 10 秒总期限。
 
 生产反向代理应设置与 Node 一致的并发上限和每 IP 请求速率：
@@ -226,3 +329,5 @@ server {
 ## GHCR 发布
 
 镜像固定为 `ghcr.io/ysyhlly/yukine-metadata-gateway`，发布 `linux/amd64` 与 `linux/arm64`。推送 `gateway-v1.2.3` 会生成 `1.2.3`、`sha-<commit>` 和 `latest`；含 `-rc.1` 等预发布后缀的版本不会更新 `latest`。也可从 Actions 手动输入 SemVer 发布。PR 和 `main` 的网关变更只执行检查及多架构构建，不推送镜像。
+
+Cloud 测试宿主镜像为 `ghcr.io/ysyhlly/yukine-cloud`；推送 `cloud-v1.2.3` 使用同样的 SemVer、SHA 与稳定版 `latest` 规则。该镜像仍是账号系统接入前的授权模块测试宿主，不应作为正式 `/v1/me` 服务发布。

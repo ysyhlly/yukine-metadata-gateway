@@ -3,20 +3,42 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "yukine-cloud"
+  ],
   "scripts": {
-    "check": "npm run check:worker && npm run check:node && npm run check:openapi",
+    "build:contract": "npm run build -w @yukine/authorization-contract",
+    "check:contract": "npm run check -w @yukine/authorization-contract",
+    "check:cloud": "npm run check -w @yukine/cloud",
+    "check": "npm run build:contract && npm run check:contract && npm run check:worker && npm run check:node && npm run check:cloud && npm run check:openapi",
     "check:worker": "tsc -p tsconfig.worker.json --noEmit",
     "check:node": "tsc -p tsconfig.node.json --noEmit",
     "check:openapi": "tsx scripts/generate-openapi.ts --check",
     "generate:openapi": "tsx scripts/generate-openapi.ts",
-    "build:node": "tsc -p tsconfig.node.json",
-    "test": "tsx --test test/*.test.ts",
-    "test:external": "tsx --test test/external-state.integration.ts",
+    "generate:authorization-dev-secrets": "node scripts/generate-authorization-dev-secrets.mjs",
+    "build:node": "npm run build:contract && tsc -p tsconfig.node.json",
+    "build:cloud": "npm run build -w @yukine/cloud",
+    "test": "npm run build:contract && tsx --test test/*.test.ts packages/authorization-contract/test/*.test.ts yukine-cloud/test/*.test.ts",
+    "test:external": "tsx --test test/external-state.integration.ts yukine-cloud/test/external.integration.ts",
     "migrate:external-state": "tsx src/node/migrate-external-state.ts",
+    "migrate:authorization-state": "tsx src/node/migrate-authorization-state.ts",
     "start": "node dist/node/server.js",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "dry-run": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.220.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/sdk-metrics": "^2.9.0",
+    "@opentelemetry/sdk-node": "^0.220.0",
+    "@yukine/authorization-contract": "*",
+    "ioredis": "^5.11.1",
+    "pg": "^8.22.0",
+    "zod": "^4.4.3",
+    "zod-openapi": "^6.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260716.1",
@@ -25,16 +47,5 @@
     "tsx": "^4.20.6",
     "typescript": "^7.0.2",
     "wrangler": "^4.111.0"
-  },
-  "dependencies": {
-    "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.220.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
-    "@opentelemetry/sdk-metrics": "^2.9.0",
-    "@opentelemetry/sdk-node": "^0.220.0",
-    "ioredis": "^5.11.1",
-    "pg": "^8.22.0",
-    "zod": "^4.4.3",
-    "zod-openapi": "^6.0.0"
   }
 }

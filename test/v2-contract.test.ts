@@ -8,6 +8,9 @@ import type {
 } from "../src/types.js";
 
 const RECORDING_ID = "12345678-1234-4123-8123-123456789abc";
+const RELEASE_GROUP_ID = "22345678-1234-4123-8123-123456789abc";
+const RELEASE_ID = "32345678-1234-4123-8123-123456789abc";
+const OTHER_RELEASE_GROUP_ID = "42345678-1234-4123-8123-123456789abc";
 
 test("v2 recording search merges MusicBrainz and iTunes evidence", async () => {
   const transport = new FixtureTransport((url) => {
@@ -116,6 +119,176 @@ test("v2 artist response attributes identity and enrichment sources", async () =
   ]);
 });
 
+test("v2 album lookup maps a release group and derives aliases without inventing a release", async () => {
+  const transport = new FixtureTransport((url) => success(url, {
+    id: RELEASE_GROUP_ID.toUpperCase(),
+    title: "Canonical Album",
+    "primary-type": "Album",
+    "first-release-date": "2024-03-01",
+    "artist-credit": [{
+      name: "Album Artist",
+      artist: { id: "artist-id", name: "Album Artist" }
+    }],
+    releases: [
+      { id: RELEASE_ID, title: "Canonical Album" },
+      { id: "52345678-1234-4123-8123-123456789abc", title: "本地名称" },
+      { id: "62345678-1234-4123-8123-123456789abc", title: "本地名称" },
+      { id: "72345678-1234-4123-8123-123456789abc", title: "Other Language Name" }
+    ]
+  }));
+
+  const response = await request(
+    `/v2/albums/search?releaseGroupMbid=${RELEASE_GROUP_ID.toUpperCase()}`,
+    transport
+  );
+  const album = (response.body as {
+    albums: Array<{
+      canonicalId: string;
+      title: string;
+      aliases: string[];
+      artist: string;
+      artists: Array<{ id: string; name: string }>;
+      type: string;
+      year: number;
+      identifiers: { releaseGroupMbid: string; releaseMbid?: string };
+      confidence: number;
+      sources: Array<Record<string, unknown>>;
+    }>;
+  }).albums[0];
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["Cache-Control"], "public, max-age=86400");
+  assert.equal(album?.canonicalId, `album:mbid:${RELEASE_GROUP_ID}`);
+  assert.equal(album?.title, "Canonical Album");
+  assert.deepEqual(album?.aliases, ["本地名称", "Other Language Name"]);
+  assert.equal(album?.artist, "Album Artist");
+  assert.deepEqual(album?.artists, [{ id: "artist-id", name: "Album Artist" }]);
+  assert.equal(album?.type, "Album");
+  assert.equal(album?.year, 2024);
+  assert.deepEqual(album?.identifiers, { releaseGroupMbid: RELEASE_GROUP_ID });
+  assert.equal(album?.confidence, 1);
+  assert.deepEqual(album?.sources, [{
+    provider: "musicbrainz",
+    id: RELEASE_GROUP_ID,
+    role: "identity"
+  }]);
+  assert.equal(transport.urls[0]?.pathname, `/ws/2/release-group/${RELEASE_GROUP_ID}`);
+  assert.equal(transport.urls[0]?.searchParams.get("inc"), "artist-credits releases");
+});
+
+test("v2 album release lookup preserves the release and rejects conflicting strong identifiers", async () => {
+  const fixture = (url: URL) => success(url, {
+    id: RELEASE_ID,
+    title: "Local Edition",
+    date: "2024-04-01",
+    "artist-credit": [{
+      name: "Album Artist",
+      artist: { id: "artist-id", name: "Album Artist" }
+    }],
+    "release-group": {
+      id: RELEASE_GROUP_ID,
+      title: "Canonical Album",
+      "primary-type": "Album"
+    }
+  });
+  const matched = await request(
+    `/v2/albums/search?releaseMbid=${RELEASE_ID}&title=Ignored`,
+    new FixtureTransport(fixture)
+  );
+  const conflict = await request(
+    `/v2/albums/search?releaseMbid=${RELEASE_ID}`
+      + `&releaseGroupMbid=${OTHER_RELEASE_GROUP_ID}`,
+    new FixtureTransport(fixture)
+  );
+  const wrongRelease = await request(
+    `/v2/albums/search?releaseMbid=${RELEASE_ID}`,
+    new FixtureTransport((url) => success(url, {
+      ...objectFixture(fixture(url)),
+      id: "52345678-1234-4123-8123-123456789abc"
+    }))
+  );
+  const album = (matched.body as {
+    albums: Array<{ aliases: string[]; identifiers: Record<string, string> }>;
+  }).albums[0];
+
+  assert.equal(matched.status, 200);
+  assert.deepEqual(album?.aliases, ["Local Edition"]);
+  assert.deepEqual(album?.identifiers, {
+    releaseGroupMbid: RELEASE_GROUP_ID,
+    releaseMbid: RELEASE_ID
+  });
+  assert.deepEqual(conflict.body, { albums: [] });
+  assert.deepEqual(wrongRelease.body, { albums: [] });
+});
+
+test("v2 album text search returns every distinct candidate in deterministic confidence order", async () => {
+  const firstId = "12345678-2234-4123-8123-123456789abc";
+  const secondId = "22345678-2234-4123-8123-123456789abc";
+  const thirdId = "32345678-2234-4123-8123-123456789abc";
+  const transport = new FixtureTransport((url) => success(url, {
+    "release-groups": [
+      { id: thirdId, title: "Third", score: 91 },
+      { id: secondId, title: "Second", score: 97 },
+      { id: firstId, title: "First", score: 97 },
+      { id: firstId, title: "Duplicate", score: 80 }
+    ]
+  }));
+
+  const response = await request(
+    "/v2/albums/search?title=Echo&artist=Artist&year=2024&type=Album",
+    transport
+  );
+  const albums = (response.body as {
+    albums: Array<{ canonicalId: string; confidence: number }>;
+  }).albums;
+  const upstreamQuery = transport.urls[0]?.searchParams.get("query") || "";
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(albums.map((album) => album.canonicalId), [
+    `album:mbid:${firstId}`,
+    `album:mbid:${secondId}`,
+    `album:mbid:${thirdId}`
+  ]);
+  assert.deepEqual(albums.map((album) => album.confidence), [0.97, 0.97, 0.91]);
+  assert.match(upstreamQuery, /releasegroup:"Echo"/);
+  assert.match(upstreamQuery, /artist:"Artist"/);
+  assert.match(upstreamQuery, /firstreleasedate:2024\*/);
+  assert.match(upstreamQuery, /primarytype:"Album"/);
+  assert.equal(transport.urls[0]?.searchParams.get("limit"), "10");
+});
+
+test("v2 album validation, empty results, not found, and upstream failures keep stable semantics", async () => {
+  const missing = await request("/v2/albums/search?artist=Only", new FixtureTransport());
+  const invalid = await request(
+    "/v2/albums/search?title=Private&year=nope&limit=26&extra=secret",
+    new FixtureTransport()
+  );
+  const empty = await request(
+    "/v2/albums/search?title=None&limit=25",
+    new FixtureTransport((url) => success(url, { "release-groups": [] }))
+  );
+  const notFoundResponse = await request(
+    `/v2/albums/search?releaseGroupMbid=${RELEASE_GROUP_ID}`,
+    new FixtureTransport(notFound)
+  );
+  const unavailable = await request(
+    "/v2/albums/search?title=Private",
+    new FixtureTransport((url) => failure(url, 503))
+  );
+
+  assert.equal(missing.status, 400);
+  assert.equal(invalid.status, 400);
+  assert.doesNotMatch(JSON.stringify(invalid.body), /Private|nope|secret/);
+  assert.deepEqual(empty.body, { albums: [] });
+  assert.deepEqual(notFoundResponse.body, { albums: [] });
+  assert.equal(unavailable.status, 502);
+  assert.deepEqual(unavailable.body, {
+    error: "upstream_failure",
+    requestId: "request-v2"
+  });
+  assert.doesNotMatch(JSON.stringify(unavailable.body), /Private/);
+});
+
 test("v2 lyrics preserves null semantics and exact match attribution", async () => {
   const transport = new FixtureTransport((url) => {
     if (url.pathname.endsWith("/get")) {
@@ -152,11 +325,14 @@ test("readiness and OpenAPI are available in the shared runtime", async () => {
   assert.ok((specification.body as { paths: Record<string, unknown> }).paths[
     "/v2/recordings/search"
   ]);
+  assert.ok((specification.body as { paths: Record<string, unknown> }).paths[
+    "/v2/albums/search"
+  ]);
 });
 
 test("v2 feature flag and v1 sunset headers preserve the release boundary", async () => {
   const disabled = await request(
-    "/v2/recordings/search?title=Song",
+    "/v2/albums/search?title=Album",
     new FixtureTransport(),
     {
       env: {
@@ -230,4 +406,14 @@ function success(url: URL, data: unknown): UpstreamJsonResult {
 
 function failure(url: URL, status: number): UpstreamJsonResult {
   return { kind: "failure", status, host: url.hostname, cacheHit: false };
+}
+
+function notFound(url: URL): UpstreamJsonResult {
+  return { kind: "not_found", status: 404, host: url.hostname, cacheHit: false };
+}
+
+function objectFixture(result: UpstreamJsonResult): Record<string, unknown> {
+  return result.kind === "success" && result.data && typeof result.data === "object"
+    ? result.data as Record<string, unknown>
+    : {};
 }

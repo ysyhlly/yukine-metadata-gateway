@@ -24,6 +24,15 @@ import type { DashboardStoreAdapter } from "./dashboard-store-adapter.js";
 import { PostgresDashboardStore } from "./postgres-dashboard-store.js";
 import { dashboardPage, loginPage, setupPage } from "./dashboard-ui.js";
 import type { RuntimeStatsProvider } from "./runtime-stats.js";
+import {
+  GatewayAuthorizationError,
+  GatewayAuthorizationService
+} from "./gateway-authorization.js";
+import {
+  capabilitySchema,
+  normalizeCapabilities,
+  type AuthorizationCapability
+} from "@yukine/authorization-contract";
 
 const EMPTY_TRACE: RequestTrace = { cacheHit: false, upstream: [] };
 const MAX_BODY_BYTES = 16 * 1024;
@@ -62,7 +71,8 @@ export class Dashboard {
 
   constructor(
     private readonly config: DashboardConfig,
-    runtimeStats: RuntimeStatsProvider | (() => { entries: number; maxEntries: number })
+    runtimeStats: RuntimeStatsProvider | (() => { entries: number; maxEntries: number }),
+    private readonly authorization?: GatewayAuthorizationService
   ) {
     const runtimeStatsProvider = normalizeRuntimeStats(runtimeStats, config);
     this.store = config.backend === "external"
@@ -157,6 +167,9 @@ export class Dashboard {
     }
     if (method === "POST" && url.pathname === "/admin/api/logout") {
       return this.logout(request, requestId);
+    }
+    if (url.pathname.startsWith("/admin/api/authorization/")) {
+      return this.authorizationRequest(request, url, requestId);
     }
     return json(404, { error: "not_found", requestId });
   }
@@ -286,8 +299,91 @@ export class Dashboard {
       : "1h";
     return json(200, {
       ...await this.metrics.snapshot(window),
-      csrfToken: session.csrfToken
+      csrfToken: session.csrfToken,
+      authorization: this.authorization
+        ? await this.authorization.snapshot()
+        : null
     });
+  }
+
+  private async authorizationRequest(
+    request: IncomingMessage,
+    url: URL,
+    requestId: string
+  ): Promise<DashboardResponse> {
+    if (!this.authorization) return json(404, { error: "not_found", requestId });
+    if ((request.method || "GET") !== "POST") {
+      return json(405, { error: "method_not_allowed", requestId });
+    }
+    const originError = this.checkOrigin(request, requestId);
+    if (originError) return originError;
+    const session = await this.session(request);
+    const suppliedCsrf = header(request, "x-csrf-token");
+    if (!session || !suppliedCsrf || !safeTextEqual(suppliedCsrf, session.csrfToken)) {
+      return json(403, { error: "forbidden", requestId });
+    }
+    const parsed = await readJson(request, requestId);
+    if ("response" in parsed) return parsed.response;
+    try {
+      if (url.pathname === "/admin/api/authorization/subjects") {
+        const input = parseSubjectInput(parsed.body, false);
+        const subject = await this.authorization.createSubject(input);
+        return json(201, { subject });
+      }
+      const subjectKey = /^\/admin\/api\/authorization\/subjects\/([^/]+)\/api-keys$/
+        .exec(url.pathname);
+      if (subjectKey?.[1]) {
+        const issued = await this.authorization.issueApiKey(subjectKey[1]);
+        return json(201, {
+          credential: {
+            type: "api_key",
+            value: issued.value,
+            fingerprint: issued.fingerprint
+          }
+        });
+      }
+      const subjectRedemption =
+        /^\/admin\/api\/authorization\/subjects\/([^/]+)\/redemptions$/
+          .exec(url.pathname);
+      if (subjectRedemption?.[1]) {
+        const expiresAt = parseFutureDate(parsed.body.expiresAt);
+        const issued = await this.authorization.issueRedemption(
+          subjectRedemption[1],
+          expiresAt
+        );
+        return json(201, {
+          credential: {
+            type: "redemption_url",
+            value: issued.value,
+            fingerprint: issued.fingerprint
+          }
+        });
+      }
+      const subjectUpdate = /^\/admin\/api\/authorization\/subjects\/([^/]+)$/
+        .exec(url.pathname);
+      if (subjectUpdate?.[1]) {
+        const input = parseSubjectInput(parsed.body, true);
+        const updated = await this.authorization.updateSubject(subjectUpdate[1], input);
+        return updated
+          ? json(200, { ok: true })
+          : json(404, { error: "not_found", requestId });
+      }
+      const credentialRevoke =
+        /^\/admin\/api\/authorization\/credentials\/([^/]+)\/revoke$/
+          .exec(url.pathname);
+      if (credentialRevoke?.[1]) {
+        const revoked = await this.authorization.revokeCredential(credentialRevoke[1]);
+        return revoked
+          ? json(200, { ok: true })
+          : json(404, { error: "not_found", requestId });
+      }
+      return json(404, { error: "not_found", requestId });
+    } catch (error) {
+      if (error instanceof GatewayAuthorizationError) {
+        return json(error.status, { error: error.code, requestId });
+      }
+      throw error;
+    }
   }
 
   private async logout(
@@ -334,6 +430,44 @@ export class Dashboard {
 function requiredDatabaseUrl(config: DashboardConfig): string {
   if (!config.databaseUrl) throw new Error("dashboard_database_url_required");
   return config.databaseUrl;
+}
+
+function parseSubjectInput(
+  body: Record<string, unknown>,
+  requireActive: boolean
+): {
+  label: string;
+  capabilities: AuthorizationCapability[];
+  expiresAt: number;
+  active: boolean;
+} {
+  const label = typeof body.label === "string" ? body.label : "";
+  const capabilitiesResult = capabilitySchema.array().safeParse(body.capabilities);
+  if (!capabilitiesResult.success) {
+    throw new GatewayAuthorizationError(400, "invalid_request");
+  }
+  const active = requireActive
+    ? typeof body.active === "boolean"
+      ? body.active
+      : true
+    : true;
+  return {
+    label,
+    capabilities: normalizeCapabilities(capabilitiesResult.data),
+    expiresAt: parseFutureDate(body.expiresAt),
+    active
+  };
+}
+
+function parseFutureDate(value: unknown): number {
+  if (typeof value !== "string") {
+    throw new GatewayAuthorizationError(400, "invalid_request");
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) {
+    throw new GatewayAuthorizationError(400, "invalid_request");
+  }
+  return timestamp;
 }
 
 function normalizeRuntimeStats(

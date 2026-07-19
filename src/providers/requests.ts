@@ -32,6 +32,21 @@ export function musicBrainzArtistSearch(query: string, limit: number): string {
     + `&limit=${limit}&fmt=json`;
 }
 
+export function musicBrainzReleaseGroupById(id: string): string {
+  return `${MUSICBRAINZ_API}release-group/${encodeURIComponent(id)}`
+    + "?inc=artist-credits+releases&fmt=json";
+}
+
+export function musicBrainzReleaseById(id: string): string {
+  return `${MUSICBRAINZ_API}release/${encodeURIComponent(id)}`
+    + "?inc=artist-credits+release-groups&fmt=json";
+}
+
+export function musicBrainzReleaseGroupSearch(clauses: string[], limit: number): string {
+  return `${MUSICBRAINZ_API}release-group/?query=${encodeURIComponent(clauses.join(" AND "))}`
+    + `&limit=${limit}&fmt=json`;
+}
+
 export function acoustIdLookupRequest(input: {
   client: string;
   duration: number;

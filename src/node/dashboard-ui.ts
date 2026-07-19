@@ -305,6 +305,38 @@ export function dashboardPage(nonce: string): string {
     .instance-metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: .65rem; margin-top: .85rem; }
     .instance-metrics span { color: var(--muted); font-size: .55rem; }
     .instance-metrics strong { display: block; margin-top: .2rem; font: 650 .68rem/1.2 "Cascadia Mono", monospace; }
+    .authorization-layout { display: grid; grid-template-columns: minmax(17rem,.72fr) minmax(0,1.45fr); gap: .85rem; align-items: start; }
+    .authorization-form { display: grid; gap: .72rem; position: sticky; top: 1rem; }
+    .authorization-form label, .subject-edit-form label { display: grid; gap: .3rem; color: var(--muted); font-size: .6rem; font-weight: 700; letter-spacing: .05em; }
+    .authorization-form input, .subject-edit-form input { width: 100%; box-sizing: border-box; border: 1px dashed var(--pink); border-radius: .68rem; padding: .62rem .7rem; color: var(--ink); background: rgba(255,253,248,.94); }
+    .capability-picker { display: flex; gap: .45rem; flex-wrap: wrap; }
+    .capability-picker label { display: inline-flex; grid-auto-flow: column; align-items: center; gap: .35rem; padding: .42rem .55rem; border: 1px solid var(--line); border-radius: 1rem; background: rgba(255,255,255,.55); letter-spacing: 0; }
+    .capability-picker input { width: auto; margin: 0; accent-color: var(--pink); }
+    .authorization-status { min-height: 1.2rem; color: var(--muted); font-size: .64rem; }
+    .authorization-status.error { color: #aa4e58; }
+    .subject-list { display: grid; gap: .75rem; }
+    .subject-card { border: 1px solid var(--line); border-left: 4px solid var(--cyan); border-radius: .9rem; padding: 1rem; background: rgba(255,253,248,.86); }
+    .subject-card.inactive { border-left-color: #c7b9ae; opacity: .78; }
+    .subject-card.expired { border-left-color: #d77f82; }
+    .subject-head { display: flex; justify-content: space-between; gap: .8rem; align-items: start; margin-bottom: .75rem; }
+    .subject-id { margin-top: .22rem; color: var(--muted); font: .56rem/1.4 "Cascadia Mono", monospace; word-break: break-all; }
+    .subject-edit-form { display: grid; grid-template-columns: 1fr minmax(12rem,.8fr); gap: .65rem; }
+    .subject-edit-form .capability-picker, .subject-edit-form .subject-actions { grid-column: 1 / -1; }
+    .subject-actions { display: flex; align-items: end; gap: .45rem; flex-wrap: wrap; padding-top: .7rem; border-top: 1px dashed var(--line); }
+    .subject-actions .control { min-width: 13rem; }
+    .small-button { border: 1px solid var(--line); border-radius: 1rem; padding: .48rem .7rem; color: #625b56; background: #fffaf2; font-size: .6rem; font-weight: 750; }
+    .small-button.danger { color: #aa4e58; border-color: rgba(215,127,130,.55); }
+    .credential-list { display: grid; gap: .35rem; margin-top: .7rem; }
+    .credential-row { display: grid; grid-template-columns: 1fr auto auto; gap: .55rem; align-items: center; padding: .5rem .6rem; border-radius: .62rem; background: rgba(222,201,184,.17); font-size: .6rem; }
+    .credential-row code { color: #6a625c; font-family: "Cascadia Mono", monospace; }
+    .audit-list { display: grid; gap: .3rem; max-height: 18rem; overflow: auto; }
+    .audit-row { display: grid; grid-template-columns: 9rem 1fr auto; gap: .6rem; padding: .48rem 0; border-bottom: 1px dashed var(--line); font-size: .58rem; }
+    .audit-row code { color: var(--pink); }
+    .secret-dialog { width: min(40rem,calc(100% - 2rem)); border: 1px solid var(--pink); border-radius: 1rem; padding: 0; color: var(--ink); background: #fffaf2; box-shadow: 0 2rem 5rem rgba(94,72,81,.28); }
+    .secret-dialog::backdrop { background: rgba(76,61,66,.34); backdrop-filter: blur(3px); }
+    .secret-dialog-inner { padding: 1.2rem; }
+    .secret-value { padding: .8rem; border: 1px dashed var(--pink); border-radius: .7rem; background: #fff; white-space: pre-wrap; word-break: break-all; font: .65rem/1.6 "Cascadia Mono", monospace; user-select: all; }
+    .secret-warning { color: #aa4e58; font-size: .65rem; line-height: 1.6; }
     .methodology { margin-top: 1.3rem; padding-top: .8rem; border-top: 2px dashed var(--line); color: var(--muted); font-size: .64rem; line-height: 1.7; }
     .empty { padding: 1.4rem; color: var(--muted); text-align: center; font-size: .7rem; }
     .mascot { position: fixed; z-index: 1; width: 6.5rem; right: 3vw; top: 39vh; filter: drop-shadow(0 1rem 1.1rem rgba(171,116,142,.12)); pointer-events: none; }
@@ -317,6 +349,8 @@ export function dashboardPage(nonce: string): string {
       .hero-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .hero-card { grid-column: 1 / -1; grid-row: auto; }
       .status-grid, .provider-grid { grid-template-columns: 1fr; }
+      .authorization-layout { grid-template-columns: 1fr; }
+      .authorization-form { position: static; }
       .instance-metrics { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 520px) {
@@ -327,6 +361,7 @@ export function dashboardPage(nonce: string): string {
       .status-line { grid-template-columns: 1fr; gap: .25rem; }
       .status-line span { text-align: left; }
       .provider-metrics { grid-template-columns: repeat(2, 1fr); }
+      .subject-edit-form { grid-template-columns: 1fr; }
       .dashboard-tab { min-width: 6.4rem; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -368,6 +403,7 @@ export function dashboardPage(nonce: string): string {
       <button class="dashboard-tab" id="tab-performance" role="tab" aria-selected="false" aria-controls="panel-performance" data-tab="performance" data-i18n="performance" tabindex="-1">性能</button>
       <button class="dashboard-tab" id="tab-providers" role="tab" aria-selected="false" aria-controls="panel-providers" data-tab="providers" data-i18n="providers" tabindex="-1">来源</button>
       <button class="dashboard-tab" id="tab-runtime" role="tab" aria-selected="false" aria-controls="panel-runtime" data-tab="runtime" data-i18n="runtime" tabindex="-1">运行时</button>
+      <button class="dashboard-tab" id="tab-authorization" role="tab" aria-selected="false" aria-controls="panel-authorization" data-tab="authorization" data-i18n="authorization" tabindex="-1">远端授权</button>
     </nav>
 
     <div id="dashboard-content">
@@ -443,10 +479,44 @@ export function dashboardPage(nonce: string): string {
         <div class="section-title"><div><h2>Instances</h2><p data-i18n="instancesHelp">15 秒心跳；超过 45 秒未更新会标记为离线。</p></div></div>
         <div id="instance-list" class="instance-list"><div class="empty" data-i18n="instanceWaiting">等待实例心跳</div></div>
       </section>
+
+      <section id="panel-authorization" class="dashboard-panel" role="tabpanel" aria-labelledby="tab-authorization" hidden>
+        <div class="section-title"><div><h2>Trusted authorization</h2><p data-i18n="authorizationHelp">发行只显示一次的凭据，并管理稳定 subject 与 capability。</p></div></div>
+        <div class="authorization-layout">
+          <form id="subject-create-form" class="paper-panel authorization-form">
+            <div class="eyebrow">NEW SUBJECT</div>
+            <label><span data-i18n="subjectLabel">授权名称</span><input id="subject-label" maxlength="80" required autocomplete="off"></label>
+            <label><span data-i18n="subjectExpires">授权到期时间</span><input id="subject-expires" type="datetime-local" required></label>
+            <div class="capability-picker" aria-label="Capabilities">
+              <label><input type="checkbox" name="subject-capability" value="official_metadata_gateway" checked> official_metadata_gateway</label>
+              <label><input type="checkbox" name="subject-capability" value="together_listening"> together_listening</label>
+            </div>
+            <button class="button" type="submit" data-i18n="createSubject">创建授权主体</button>
+            <div id="authorization-status" class="authorization-status" role="status" aria-live="polite"></div>
+          </form>
+          <div>
+            <div id="subject-list" class="subject-list"><div class="empty" data-i18n="authorizationWaiting">等待授权状态</div></div>
+            <div class="section-title"><div><h2>Audit trail</h2><p data-i18n="auditHelp">只记录动作、指纹和对象 ID，不记录凭据明文。</p></div></div>
+            <div id="authorization-audit" class="paper-panel audit-list"><div class="empty" data-i18n="auditWaiting">尚无授权操作</div></div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <p id="methodology" class="methodology">正在载入指标口径。</p>
   </main>
+  <dialog id="secret-dialog" class="secret-dialog">
+    <div class="secret-dialog-inner">
+      <div class="eyebrow" data-i18n="oneTimeSecret">ONE-TIME SECRET</div>
+      <h2 id="secret-title" data-i18n="credentialReady">凭据已生成</h2>
+      <p class="secret-warning" data-i18n="secretWarning">请立即复制；关闭后面板不会再次返回明文。</p>
+      <pre id="secret-value" class="secret-value"></pre>
+      <div class="subject-actions">
+        <button id="copy-secret" class="button" type="button" data-i18n="copyCredential">复制凭据</button>
+        <button id="close-secret" class="small-button" type="button" data-i18n="close">关闭</button>
+      </div>
+    </div>
+  </dialog>
   <script nonce="${escapeHtml(nonce)}">${dashboardScript()}</script>
 </body>
 </html>`;
@@ -635,6 +705,33 @@ const DASHBOARD_MESSAGES = {
     performance: "性能",
     providers: "来源",
     runtime: "运行时",
+    authorization: "远端授权",
+    authorizationHelp: "发行只显示一次的凭据，并管理稳定 subject 与 capability。",
+    subjectLabel: "授权名称",
+    subjectExpires: "授权到期时间",
+    createSubject: "创建授权主体",
+    authorizationWaiting: "等待授权状态",
+    authorizationDisabled: "可信授权发行未启用。",
+    auditHelp: "只记录动作、指纹和对象 ID，不记录凭据明文。",
+    auditWaiting: "尚无授权操作",
+    oneTimeSecret: "一次性凭据",
+    credentialReady: "凭据已生成",
+    secretWarning: "请立即复制；关闭后面板不会再次返回明文。",
+    copyCredential: "复制凭据",
+    copied: "已复制",
+    close: "关闭",
+    saveSubject: "保存主体",
+    issueApiKey: "发行 API Key",
+    issueRedemption: "发行兑换 URL",
+    redemptionExpires: "兑换链接到期",
+    revoke: "吊销",
+    active: "启用",
+    inactive: "停用",
+    expired: "已过期",
+    noCredentials: "尚未发行 API Key",
+    savingAuthorization: "正在保存…",
+    authorizationSaved: "授权状态已更新。",
+    authorizationFailed: "授权操作失败，请检查字段或稍后重试。",
     gatewayNow: "元数据网关现在…",
     readingSignal: "正在读取第一束运行信号。",
     signalSummary: "请求状态、延迟和缓存的快速诊断。",
@@ -725,6 +822,33 @@ const DASHBOARD_MESSAGES = {
     performance: "Performance",
     providers: "Providers",
     runtime: "Runtime",
+    authorization: "Authorization",
+    authorizationHelp: "Issue one-time-visible credentials and manage stable subjects and capabilities.",
+    subjectLabel: "Authorization label",
+    subjectExpires: "Authorization expiry",
+    createSubject: "Create subject",
+    authorizationWaiting: "Waiting for authorization state",
+    authorizationDisabled: "Trusted authorization issuance is disabled.",
+    auditHelp: "Only actions, fingerprints, and object IDs are retained. Plaintext credentials are excluded.",
+    auditWaiting: "No authorization actions yet",
+    oneTimeSecret: "ONE-TIME SECRET",
+    credentialReady: "Credential created",
+    secretWarning: "Copy it now. The dashboard will never return the plaintext again.",
+    copyCredential: "Copy credential",
+    copied: "Copied",
+    close: "Close",
+    saveSubject: "Save subject",
+    issueApiKey: "Issue API key",
+    issueRedemption: "Issue redemption URL",
+    redemptionExpires: "Redemption expiry",
+    revoke: "Revoke",
+    active: "Active",
+    inactive: "Inactive",
+    expired: "Expired",
+    noCredentials: "No API keys issued",
+    savingAuthorization: "Saving…",
+    authorizationSaved: "Authorization state updated.",
+    authorizationFailed: "Authorization action failed. Check the fields and try again.",
     gatewayNow: "The metadata gateway is…",
     readingSignal: "Reading the first runtime signal.",
     signalSummary: "A quick diagnosis of requests, latency, and cache behavior.",
@@ -814,6 +938,9 @@ function dashboardScript(): string {
     var chartMetric = document.getElementById('chart-metric');
     var routeSort = document.getElementById('route-sort');
     var languageSelect = document.getElementById('language');
+    var subjectForm = document.getElementById('subject-create-form');
+    var authorizationStatus = document.getElementById('authorization-status');
+    var secretDialog = document.getElementById('secret-dialog');
     var svgNamespace = 'http://www.w3.org/2000/svg';
     var connectionStatus = 'connecting';
     var connectionOffline = false;
@@ -992,7 +1119,239 @@ function dashboardScript(): string {
       renderProviders(data.providers || []);
       renderCache(data.cache);
       renderInstances(instances);
+      renderAuthorization(data.authorization);
       renderTrend(data);
+    }
+
+    function renderAuthorization(data) {
+      var list = document.getElementById('subject-list');
+      var audit = document.getElementById('authorization-audit');
+      list.replaceChildren();
+      audit.replaceChildren();
+      subjectForm.querySelectorAll('input,button').forEach(function (control) {
+        control.disabled = !data;
+      });
+      if (!data) {
+        empty(list, t('authorizationDisabled'));
+        empty(audit, t('auditWaiting'));
+        return;
+      }
+      var subjects = Array.isArray(data.subjects) ? data.subjects : [];
+      if (!subjects.length) empty(list, t('authorizationWaiting'));
+      subjects.forEach(function (subject) {
+        list.appendChild(subjectCard(subject));
+      });
+      var entries = Array.isArray(data.audit) ? data.audit : [];
+      if (!entries.length) empty(audit, t('auditWaiting'));
+      entries.forEach(function (entry) {
+        var row = document.createElement('div');
+        row.className = 'audit-row';
+        var action = document.createElement('code');
+        action.textContent = entry.action;
+        var target = document.createElement('span');
+        target.textContent = entry.fingerprint || entry.credentialId || entry.subjectId || '—';
+        var at = document.createElement('time');
+        at.textContent = time(entry.createdAt);
+        row.append(action, target, at);
+        audit.appendChild(row);
+      });
+    }
+
+    function subjectCard(subject) {
+      var now = Date.now();
+      var expired = subject.expiresAt <= now;
+      var card = document.createElement('article');
+      card.className = 'subject-card' + (!subject.active ? ' inactive' : expired ? ' expired' : '');
+      var head = document.createElement('div');
+      head.className = 'subject-head';
+      var identity = document.createElement('div');
+      var title = document.createElement('strong');
+      title.textContent = subject.label;
+      var identifier = document.createElement('div');
+      identifier.className = 'subject-id';
+      identifier.textContent = subject.id;
+      identity.append(title, identifier);
+      var pill = document.createElement('span');
+      pill.className = 'state-pill' + (!subject.active || expired ? ' bad' : '');
+      pill.textContent = expired ? t('expired') : subject.active ? t('active') : t('inactive');
+      head.append(identity, pill);
+
+      var form = document.createElement('form');
+      form.className = 'subject-edit-form';
+      var labelField = field(t('subjectLabel'), 'text', subject.label);
+      var expiryField = field(t('subjectExpires'), 'datetime-local', localDateValue(subject.expiresAt));
+      form.append(labelField.label, expiryField.label);
+      var capabilities = capabilityPicker(subject.capabilities);
+      var activeLabel = document.createElement('label');
+      var activeInput = document.createElement('input');
+      activeInput.type = 'checkbox';
+      activeInput.checked = Boolean(subject.active);
+      activeLabel.append(activeInput, document.createTextNode(' ' + t('active')));
+      capabilities.appendChild(activeLabel);
+      form.appendChild(capabilities);
+      var save = document.createElement('button');
+      save.type = 'submit';
+      save.className = 'small-button';
+      save.textContent = t('saveSubject');
+      form.appendChild(save);
+      form.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        await performAuthorization(async function () {
+          await authorizationPost('/admin/api/authorization/subjects/' + encodeURIComponent(subject.id), {
+            label: labelField.input.value,
+            expiresAt: new Date(expiryField.input.value).toISOString(),
+            capabilities: selectedCapabilities(capabilities),
+            active: activeInput.checked
+          });
+        });
+      });
+
+      var credentials = document.createElement('div');
+      credentials.className = 'credential-list';
+      if (!subject.credentials || !subject.credentials.length) {
+        empty(credentials, t('noCredentials'));
+      } else {
+        subject.credentials.forEach(function (credential) {
+          var row = document.createElement('div');
+          row.className = 'credential-row';
+          var code = document.createElement('code');
+          code.textContent = credential.fingerprint;
+          var status = document.createElement('span');
+          status.textContent = credential.status;
+          var revoke = document.createElement('button');
+          revoke.type = 'button';
+          revoke.className = 'small-button danger';
+          revoke.textContent = t('revoke');
+          revoke.disabled = credential.status === 'revoked';
+          revoke.addEventListener('click', function () {
+            performAuthorization(async function () {
+              await authorizationPost(
+                '/admin/api/authorization/credentials/' + encodeURIComponent(credential.id) + '/revoke',
+                {}
+              );
+            });
+          });
+          row.append(code, status, revoke);
+          credentials.appendChild(row);
+        });
+      }
+
+      var actions = document.createElement('div');
+      actions.className = 'subject-actions';
+      var issueKey = document.createElement('button');
+      issueKey.type = 'button';
+      issueKey.className = 'small-button';
+      issueKey.textContent = t('issueApiKey');
+      issueKey.disabled = !subject.active || expired;
+      issueKey.addEventListener('click', function () {
+        performAuthorization(async function () {
+          var result = await authorizationPost(
+            '/admin/api/authorization/subjects/' + encodeURIComponent(subject.id) + '/api-keys',
+            {}
+          );
+          showSecret(result.credential.value);
+        });
+      });
+      var redemptionField = field(
+        t('redemptionExpires'),
+        'datetime-local',
+        localDateValue(Math.min(subject.expiresAt, Date.now() + 15 * 60 * 1000))
+      );
+      redemptionField.label.className = 'control';
+      var issueRedemption = document.createElement('button');
+      issueRedemption.type = 'button';
+      issueRedemption.className = 'small-button';
+      issueRedemption.textContent = t('issueRedemption');
+      issueRedemption.disabled = !subject.active || expired;
+      issueRedemption.addEventListener('click', function () {
+        performAuthorization(async function () {
+          var result = await authorizationPost(
+            '/admin/api/authorization/subjects/' + encodeURIComponent(subject.id) + '/redemptions',
+            { expiresAt: new Date(redemptionField.input.value).toISOString() }
+          );
+          showSecret(result.credential.value);
+        });
+      });
+      actions.append(issueKey, redemptionField.label, issueRedemption);
+      card.append(head, form, credentials, actions);
+      return card;
+    }
+
+    function field(labelText, type, value) {
+      var label = document.createElement('label');
+      var labelNode = document.createElement('span');
+      labelNode.textContent = labelText;
+      var input = document.createElement('input');
+      input.type = type;
+      input.value = value;
+      input.required = true;
+      label.append(labelNode, input);
+      return { label: label, input: input };
+    }
+
+    function capabilityPicker(selected) {
+      var picker = document.createElement('div');
+      picker.className = 'capability-picker';
+      ['official_metadata_gateway', 'together_listening'].forEach(function (capability) {
+        var label = document.createElement('label');
+        var input = document.createElement('input');
+        input.type = 'checkbox';
+        input.value = capability;
+        input.checked = selected.includes(capability);
+        label.append(input, document.createTextNode(' ' + capability));
+        picker.appendChild(label);
+      });
+      return picker;
+    }
+
+    function selectedCapabilities(container) {
+      return Array.from(container.querySelectorAll('input[type="checkbox"][value]'))
+        .filter(function (input) { return input.checked; })
+        .map(function (input) { return input.value; });
+    }
+
+    async function authorizationPost(path, body) {
+      var response = await fetch(path, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken
+        },
+        body: JSON.stringify(body)
+      });
+      if (response.status === 401) {
+        location.replace('/admin/login');
+        throw new Error('session');
+      }
+      var parsed = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(parsed.error || 'authorization');
+      return parsed;
+    }
+
+    async function performAuthorization(operation) {
+      authorizationStatus.className = 'authorization-status';
+      authorizationStatus.textContent = t('savingAuthorization');
+      try {
+        await operation();
+        authorizationStatus.textContent = t('authorizationSaved');
+        await load(true);
+      } catch (_) {
+        authorizationStatus.className = 'authorization-status error';
+        authorizationStatus.textContent = t('authorizationFailed');
+      }
+    }
+
+    function showSecret(value) {
+      document.getElementById('secret-value').textContent = value;
+      secretDialog.showModal();
+    }
+
+    function localDateValue(timestamp) {
+      var date = new Date(timestamp);
+      return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+        .toISOString().slice(0, 16);
     }
 
     function renderTrend(data) {
@@ -1381,6 +1740,37 @@ function dashboardScript(): string {
       activateTab(tabs[index], true);
     });
 
+    document.getElementById('subject-expires').value = localDateValue(
+      Date.now() + 30 * 24 * 60 * 60 * 1000
+    );
+    subjectForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var capabilityContainer = subjectForm.querySelector('.capability-picker');
+      await performAuthorization(async function () {
+        await authorizationPost('/admin/api/authorization/subjects', {
+          label: document.getElementById('subject-label').value,
+          expiresAt: new Date(document.getElementById('subject-expires').value).toISOString(),
+          capabilities: selectedCapabilities(capabilityContainer)
+        });
+        subjectForm.reset();
+        document.getElementById('subject-expires').value = localDateValue(
+          Date.now() + 30 * 24 * 60 * 60 * 1000
+        );
+      });
+    });
+    document.getElementById('copy-secret').addEventListener('click', async function (event) {
+      try {
+        await navigator.clipboard.writeText(document.getElementById('secret-value').textContent);
+        event.currentTarget.textContent = t('copied');
+      } catch (_) {
+        document.getElementById('secret-value').focus();
+      }
+    });
+    document.getElementById('close-secret').addEventListener('click', function () {
+      document.getElementById('secret-value').textContent = '';
+      document.getElementById('copy-secret').textContent = t('copyCredential');
+      secretDialog.close();
+    });
     document.getElementById('logout').addEventListener('click', async function (event) {
       var button = event.currentTarget;
       button.disabled = true;

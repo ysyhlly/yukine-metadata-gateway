@@ -1,0 +1,24 @@
+{
+  "name": "@yukine/cloud",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "start:test-host": "node dist/test-host.js"
+  },
+  "dependencies": {
+    "@yukine/authorization-contract": "*",
+    "ioredis": "^5.11.1",
+    "pg": "^8.22.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.20.0",
+    "typescript": "^7.0.2"
+  }
+}

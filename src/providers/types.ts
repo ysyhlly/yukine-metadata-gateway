@@ -18,6 +18,7 @@ export type ProviderName =
 export type ProviderCapability =
   | "recording-search"
   | "artist-search"
+  | "album-search"
   | "artist-enrichment"
   | "lyrics-search";
 

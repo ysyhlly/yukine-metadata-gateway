@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { DashboardConfig } from "./dashboard.js";
@@ -28,6 +29,18 @@ export interface NodeGatewayConfig {
   instanceId?: string;
   appVersion?: string;
   appRevision?: string;
+  authorization?: NodeAuthorizationConfig;
+}
+
+export interface NodeAuthorizationConfig {
+  issuerId: string;
+  keyId: string;
+  privateKeyPem: string;
+  credentialPepper: Uint8Array;
+  publicOrigin: string;
+  dbPath: string;
+  backend: "sqlite" | "external";
+  databaseUrl?: string;
 }
 
 export function loadNodeGatewayConfig(env: NodeJS.ProcessEnv = process.env): NodeGatewayConfig {
@@ -41,6 +54,9 @@ export function loadNodeGatewayConfig(env: NodeJS.ProcessEnv = process.env): Nod
   if (stateBackend === "external" && (!redisUrl || !databaseUrl)) {
     throw new Error("external_state_requires_redis_and_database_urls");
   }
+  const dashboard = dashboardEnabled
+    ? loadDashboardConfig(env, cacheDbPath, stateBackend, databaseUrl)
+    : undefined;
   return {
     host: env.HOST?.trim() || "127.0.0.1",
     port: integer(env.PORT, 1, 65_535, 8_787),
@@ -67,9 +83,65 @@ export function loadNodeGatewayConfig(env: NodeJS.ProcessEnv = process.env): Nod
     instanceId: env.INSTANCE_ID?.trim() || hostname(),
     appVersion: env.APP_VERSION?.trim() || "1.0.0",
     appRevision: env.APP_REVISION?.trim() || "unknown",
-    dashboard: dashboardEnabled
-      ? loadDashboardConfig(env, cacheDbPath, stateBackend, databaseUrl)
+    dashboard,
+    authorization: boolean(env.AUTHORIZATION_ENABLED, false)
+      ? loadAuthorizationConfig(
+          env,
+          cacheDbPath,
+          stateBackend,
+          databaseUrl,
+          dashboard?.publicOrigin
+        )
       : undefined
+  };
+}
+
+function loadAuthorizationConfig(
+  env: NodeJS.ProcessEnv,
+  cacheDbPath: string,
+  backend: "sqlite" | "external",
+  databaseUrl: string | undefined,
+  dashboardOrigin: string | undefined
+): NodeAuthorizationConfig {
+  const issuerId = requiredText(env.AUTHORIZATION_ISSUER_ID, "authorization_issuer_id_required");
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(issuerId)) {
+    throw new Error("invalid_authorization_issuer_id");
+  }
+  const keyId = requiredText(env.AUTHORIZATION_KEY_ID, "authorization_key_id_required");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId)) {
+    throw new Error("invalid_authorization_key_id");
+  }
+  const privateKeyPath = requiredText(
+    env.AUTHORIZATION_PRIVATE_KEY_FILE,
+    "authorization_private_key_file_required"
+  );
+  const privateKeyPem = readFileSync(privateKeyPath, "utf8");
+  if (!privateKeyPem.includes("BEGIN PRIVATE KEY")) {
+    throw new Error("invalid_authorization_private_key");
+  }
+  const pepperPath = requiredText(
+    env.AUTHORIZATION_CREDENTIAL_PEPPER_FILE,
+    "authorization_credential_pepper_file_required"
+  );
+  const credentialPepper = readSecret32(pepperPath);
+  const allowInsecureTestOrigin = env.NODE_ENV?.trim() === "test"
+    && boolean(env.AUTHORIZATION_ALLOW_INSECURE_TEST, false);
+  const publicOrigin = parsePublicOrigin(
+    env.AUTHORIZATION_PUBLIC_ORIGIN?.trim()
+      || dashboardOrigin
+      || "https://metadata.ysyhly.cn",
+    allowInsecureTestOrigin
+  );
+  return {
+    issuerId,
+    keyId,
+    privateKeyPem,
+    credentialPepper,
+    publicOrigin,
+    dbPath: env.AUTHORIZATION_DB_PATH?.trim()
+      || resolve(dirname(cacheDbPath), "authorization.sqlite"),
+    backend,
+    databaseUrl
   };
 }
 
@@ -82,7 +154,9 @@ function loadDashboardConfig(
   const publicOrigin = parsePublicOrigin(
     env.DASHBOARD_PUBLIC_ORIGIN?.trim() || "https://metadata.ysyhly.cn"
   );
-  const setupToken = env.DASHBOARD_SETUP_TOKEN?.trim() || undefined;
+  const setupToken = env.DASHBOARD_SETUP_TOKEN?.trim()
+    || readOptionalTextFile(env.DASHBOARD_SETUP_TOKEN_FILE)
+    || undefined;
   if (setupToken && setupToken.length < 32) {
     throw new Error("dashboard_setup_token_too_short");
   }
@@ -115,7 +189,7 @@ function loadDashboardConfig(
   };
 }
 
-function parsePublicOrigin(value: string): string {
+function parsePublicOrigin(value: string, allowInsecure = false): string {
   const url = new URL(value);
   if (
     !["https:", "http:"].includes(url.protocol)
@@ -124,7 +198,11 @@ function parsePublicOrigin(value: string): string {
     || url.pathname !== "/"
     || url.search
     || url.hash
-    || (url.protocol === "http:" && !["localhost", "127.0.0.1", "::1"].includes(url.hostname))
+    || (
+      url.protocol === "http:"
+      && !allowInsecure
+      && !["localhost", "127.0.0.1", "::1"].includes(url.hostname)
+    )
   ) {
     throw new Error("invalid_dashboard_public_origin");
   }
@@ -155,4 +233,30 @@ function integer(
 ): number {
   const parsed = Number.parseInt(value || "", 10);
   return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+
+function requiredText(value: string | undefined, error: string): string {
+  const normalized = value?.trim();
+  if (!normalized) throw new Error(error);
+  return normalized;
+}
+
+function readSecret32(path: string): Uint8Array {
+  const raw = readFileSync(path);
+  if (raw.byteLength === 32) return new Uint8Array(raw);
+  const text = raw.toString("utf8").trim();
+  if (/^[a-fA-F0-9]{64}$/.test(text)) {
+    return new Uint8Array(Buffer.from(text, "hex"));
+  }
+  if (/^[A-Za-z0-9_-]{43}$/.test(text)) {
+    const decoded = Buffer.from(text, "base64url");
+    if (decoded.byteLength === 32) return new Uint8Array(decoded);
+  }
+  throw new Error("authorization_credential_pepper_must_be_32_bytes");
+}
+
+function readOptionalTextFile(path: string | undefined): string | undefined {
+  const normalized = path?.trim();
+  if (!normalized) return undefined;
+  return readFileSync(normalized, "utf8").trim() || undefined;
 }

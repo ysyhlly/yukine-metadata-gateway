@@ -481,6 +481,23 @@ test("shared core returns identical recording JSON for Worker and Node contexts"
   assert.deepEqual(worker.body, node.body);
 });
 
+test("shared core returns identical album JSON for Worker and Node contexts", async () => {
+  const fixture = (url: URL) => success(url, { "release-groups": [] });
+  const worker = await request(
+    "/v2/albums/search?title=Album",
+    new FixtureTransport(fixture),
+    { runtime: "worker", cache: "cloudflare" }
+  );
+  const node = await request(
+    "/v2/albums/search?title=Album",
+    new FixtureTransport(fixture),
+    { runtime: "node", cache: "sqlite" }
+  );
+
+  assert.equal(worker.status, node.status);
+  assert.deepEqual(worker.body, node.body);
+});
+
 async function request(
   path: string,
   transport: UpstreamTransport,

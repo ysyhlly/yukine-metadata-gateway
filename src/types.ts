@@ -130,7 +130,7 @@ export interface TelemetrySink {
     trace: RequestTrace;
   }): void;
   recordIdentityDecision(input: {
-    entity: "recording" | "artist" | "lyrics";
+    entity: "recording" | "artist" | "album" | "lyrics";
     decision: "merged" | "independent" | "possible_duplicate";
     confidence: number;
   }): void;

@@ -14,6 +14,14 @@ import { startNodeTelemetry } from "./telemetry.js";
 import type { NodeTelemetryRuntime } from "./telemetry.js";
 import { PostgresReadiness } from "./postgres-readiness.js";
 import type { RuntimeStatsProvider } from "./runtime-stats.js";
+import {
+  PostgresAuthorizationStore,
+  SqliteAuthorizationStore
+} from "./authorization-store.js";
+import {
+  GatewayAuthorizationError,
+  GatewayAuthorizationService
+} from "./gateway-authorization.js";
 
 export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConfig()) {
   const sqliteCache = config.stateBackend !== "external"
@@ -50,13 +58,40 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     : undefined;
   const concurrency = new RequestConcurrencyLimiter(config.maxConcurrentRequests);
   const requestRate = new RequestRateLimiter(config.maxRequestsPerSecond);
+  const authorizationStore = config.authorization
+    ? config.authorization.backend === "external"
+      ? new PostgresAuthorizationStore({
+          url: required(config.authorization.databaseUrl, "authorization_database_url_required")
+        })
+      : new SqliteAuthorizationStore({ path: config.authorization.dbPath })
+    : undefined;
+  const authorization = config.authorization && authorizationStore
+    ? new GatewayAuthorizationService({
+        issuerId: config.authorization.issuerId,
+        keyId: config.authorization.keyId,
+        privateKeyPem: config.authorization.privateKeyPem,
+        credentialPepper: config.authorization.credentialPepper,
+        publicOrigin: config.authorization.publicOrigin,
+        store: authorizationStore
+      })
+    : undefined;
+  const authorizationInitialization = authorization?.initialize();
   const startedAt = Date.now();
   let dashboard: Dashboard | undefined;
   const ready = async () => {
     const cacheReady = await cache.ready?.() ?? true;
     const postgresReady = await postgres?.ready() ?? true;
     const dashboardReady = await dashboard?.ready() ?? true;
-    return cacheReady && postgresReady && dashboardReady;
+    let authorizationReady = true;
+    if (authorization) {
+      try {
+        await authorizationInitialization;
+        authorizationReady = await authorization.ready();
+      } catch {
+        authorizationReady = false;
+      }
+    }
+    return cacheReady && postgresReady && dashboardReady && authorizationReady;
   };
   const runtimeStats: RuntimeStatsProvider = {
     snapshot: async () => {
@@ -101,7 +136,7 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
   };
   try {
     dashboard = config.dashboard
-      ? new Dashboard(config.dashboard, runtimeStats)
+      ? new Dashboard(config.dashboard, runtimeStats, authorization)
       : undefined;
   } catch (error) {
     void cache.close();
@@ -128,6 +163,7 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
           config,
           transport,
           dashboard,
+          authorization,
           ready,
           telemetry
         );
@@ -147,6 +183,7 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     server.close(() => {
       void (async () => {
         await dashboard?.close();
+        await authorization?.close();
         await cache.close();
         await postgres?.close();
         await telemetry.shutdown();
@@ -165,6 +202,7 @@ export function startNodeGateway(config: NodeGatewayConfig = loadNodeGatewayConf
     close,
     cache,
     dashboard,
+    authorization,
     concurrency,
     requestRate,
     ready,
@@ -232,6 +270,7 @@ async function serveRequest(
   config: NodeGatewayConfig,
   transport: JsonFetchTransport,
   dashboard: Dashboard | undefined,
+  authorization: GatewayAuthorizationService | undefined,
   ready: () => Promise<boolean>,
   telemetry: NodeTelemetryRuntime
 ): Promise<void> {
@@ -272,6 +311,30 @@ async function serveRequest(
       writeLog(requestId, url.pathname, failure.status, startedAt, failure.trace);
       return;
     }
+  }
+  const authorizationResult = await serveAuthorizationRequest(
+    request,
+    url,
+    requestId,
+    authorization
+  );
+  if (authorizationResult) {
+    clearTimeout(timeout);
+    response.writeHead(authorizationResult.status, authorizationResult.headers);
+    response.end(JSON.stringify(authorizationResult.body));
+    const route = safeLogRoute(url.pathname);
+    const durationMs = Date.now() - startedAt;
+    dashboard?.record(route, authorizationResult.status, durationMs, authorizationResult.trace);
+    telemetry.sink?.recordGatewayRequest({
+      route,
+      status: authorizationResult.status,
+      durationMs,
+      runtime: "node",
+      cache: config.stateBackend === "external" ? "redis" : "sqlite",
+      trace: authorizationResult.trace
+    });
+    writeLog(requestId, route, authorizationResult.status, startedAt, authorizationResult.trace);
+    return;
   }
   let gatewayResult: GatewayResult;
   try {
@@ -331,7 +394,138 @@ async function serveRequest(
     cache: config.stateBackend === "external" ? "redis" : "sqlite",
     trace: gatewayResult.trace
   });
-  writeLog(requestId, url.pathname, gatewayResult.status, startedAt, gatewayResult.trace);
+  writeLog(requestId, safeLogRoute(url.pathname), gatewayResult.status, startedAt, gatewayResult.trace);
+}
+
+async function serveAuthorizationRequest(
+  request: IncomingMessage,
+  url: URL,
+  requestId: string,
+  authorization: GatewayAuthorizationService | undefined
+): Promise<GatewayResult | null> {
+  const method = request.method || "GET";
+  const isMetadata = method === "GET"
+    && /^\/v[12]\/(recordings|artists|albums|lyrics)\/search$/.test(url.pathname);
+  const isAuthorizationPath = url.pathname === "/v1/authorization/verify"
+    || url.pathname === "/v1/authorization/activate"
+    || url.pathname.startsWith("/v1/authorization/redeem/");
+  if (!authorization) {
+    return isAuthorizationPath
+      ? authorizationJson(404, { error: "not_found", requestId })
+      : null;
+  }
+  try {
+    if (isMetadata) {
+      await authorization.authorizeMetadata(singleHeader(request.headers.authorization));
+      return null;
+    }
+    if (!isAuthorizationPath) return null;
+    if (method !== "POST") {
+      request.resume();
+      return authorizationJson(405, { error: "method_not_allowed", requestId });
+    }
+    const parsed = await readBoundedJson(request, requestId);
+    if ("result" in parsed) return parsed.result;
+    if (url.pathname === "/v1/authorization/verify") {
+      const signed = await authorization.verify(
+        singleHeader(request.headers.authorization),
+        parsed.body
+      );
+      return authorizationJson(200, signed);
+    }
+    if (url.pathname === "/v1/authorization/activate") {
+      const signed = await authorization.activate(
+        singleHeader(request.headers.authorization),
+        parsed.body
+      );
+      return authorizationJson(200, signed);
+    }
+    const token = url.pathname.slice("/v1/authorization/redeem/".length);
+    if (!token || token.includes("/")) {
+      return authorizationJson(404, { error: "not_found", requestId });
+    }
+    const redeemed = await authorization.redeem(token, parsed.body);
+    return authorizationJson(200, redeemed);
+  } catch (error) {
+    if (error instanceof GatewayAuthorizationError) {
+      const result = authorizationJson(error.status, {
+        error: error.code,
+        requestId
+      });
+      if (error.status === 401) {
+        result.headers["WWW-Authenticate"] = "Bearer";
+      }
+      return result;
+    }
+    return authorizationJson(503, {
+      error: "authorization_unavailable",
+      requestId
+    });
+  }
+}
+
+async function readBoundedJson(
+  request: IncomingMessage,
+  requestId: string
+): Promise<{ body: Record<string, unknown> } | { result: GatewayResult }> {
+  const contentType = singleHeader(request.headers["content-type"]) || "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    request.resume();
+    return {
+      result: authorizationJson(415, { error: "unsupported_media_type", requestId })
+    };
+  }
+  const declared = Number.parseInt(
+    singleHeader(request.headers["content-length"]) || "0",
+    10
+  );
+  if (Number.isFinite(declared) && declared > 16 * 1024) {
+    request.resume();
+    return {
+      result: authorizationJson(413, { error: "payload_too_large", requestId })
+    };
+  }
+  let size = 0;
+  const chunks: Buffer[] = [];
+  try {
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > 16 * 1024) {
+        request.resume();
+        return {
+          result: authorizationJson(413, { error: "payload_too_large", requestId })
+        };
+      }
+      chunks.push(buffer);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return {
+        result: authorizationJson(400, { error: "invalid_request", requestId })
+      };
+    }
+    return { body: body as Record<string, unknown> };
+  } catch {
+    return {
+      result: authorizationJson(400, { error: "invalid_request", requestId })
+    };
+  }
+}
+
+function authorizationJson(status: number, body: unknown): GatewayResult {
+  return {
+    status,
+    body,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    trace: { cacheHit: false, upstream: [] }
+  };
 }
 
 function singleHeader(value: string | string[] | undefined): string | undefined {
@@ -349,7 +543,7 @@ function writeDashboardResponse(
 function serveBusy(request: IncomingMessage, response: ServerResponse): void {
   const startedAt = Date.now();
   const requestId = randomUUID();
-  const route = safeRoute(request.url);
+  const route = safeLogRoute(safeRoute(request.url));
   request.resume();
   response.writeHead(503, {
     "Content-Type": "application/json; charset=utf-8",
@@ -370,7 +564,7 @@ function serveBusy(request: IncomingMessage, response: ServerResponse): void {
 function serveRateLimited(request: IncomingMessage, response: ServerResponse): void {
   const startedAt = Date.now();
   const requestId = randomUUID();
-  const route = safeRoute(request.url);
+  const route = safeLogRoute(safeRoute(request.url));
   request.resume();
   response.writeHead(429, {
     "Content-Type": "application/json; charset=utf-8",
@@ -425,6 +619,12 @@ function safeRoute(value: string | undefined): string {
   } catch {
     return "/";
   }
+}
+
+function safeLogRoute(pathname: string): string {
+  return pathname.startsWith("/v1/authorization/redeem/")
+    ? "/v1/authorization/redeem/[redacted]"
+    : pathname;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -3,6 +3,7 @@ import type {
   CanonicalRecording,
   SourceAttribution
 } from "../identity/recording.js";
+import type { CanonicalAlbum } from "../identity/album.js";
 
 const boundedText = (maximum: number) => z.string().trim().min(1).max(maximum);
 const numericQuery = (minimum: number, maximum: number) =>
@@ -46,6 +47,20 @@ export const artistQuerySchema = z.strictObject({
   }
 });
 
+export const albumQuerySchema = z.strictObject({
+  title: boundedText(300).optional(),
+  artist: boundedText(300).optional(),
+  releaseGroupMbid: z.uuid().transform((value) => value.toLowerCase()).optional(),
+  releaseMbid: z.uuid().transform((value) => value.toLowerCase()).optional(),
+  year: numericQuery(1, 9_999).optional(),
+  type: boundedText(100).optional(),
+  limit: numericQuery(1, 25).default(10)
+}).superRefine((value, context) => {
+  if (!value.title && !value.releaseGroupMbid && !value.releaseMbid) {
+    context.addIssue({ code: "custom", path: ["query"], message: "missing_query" });
+  }
+});
+
 export const lyricsQuerySchema = z.strictObject({
   title: boundedText(300),
   artist: boundedText(300).optional(),
@@ -55,6 +70,7 @@ export const lyricsQuerySchema = z.strictObject({
 
 export type RecordingV2Query = z.output<typeof recordingQuerySchema>;
 export type ArtistV2Query = z.output<typeof artistQuerySchema>;
+export type AlbumV2Query = z.output<typeof albumQuerySchema>;
 export type LyricsV2Query = z.output<typeof lyricsQuerySchema>;
 
 export const sourceAttributionSchema: z.ZodType<SourceAttribution> = z.strictObject({
@@ -111,6 +127,29 @@ export const canonicalArtistSchema = z.strictObject({
   sources: z.array(sourceAttributionSchema)
 });
 
+export const canonicalAlbumSchema: z.ZodType<CanonicalAlbum> = z.strictObject({
+  canonicalId: z.string().regex(/^album:mbid:[0-9a-f-]{36}$/u),
+  title: z.string(),
+  aliases: z.array(z.string()),
+  artist: z.string(),
+  artists: z.array(z.strictObject({
+    id: z.string(),
+    name: z.string()
+  })),
+  type: z.string(),
+  year: z.number().int().positive().optional(),
+  identifiers: z.strictObject({
+    releaseGroupMbid: z.uuid(),
+    releaseMbid: z.uuid().optional()
+  }),
+  confidence: z.number().min(0).max(1),
+  sources: z.array(z.strictObject({
+    provider: z.literal("musicbrainz"),
+    id: z.uuid(),
+    role: z.literal("identity")
+  }))
+});
+
 export const canonicalLyricsSchema = z.strictObject({
   canonicalId: z.string(),
   title: z.string(),
@@ -129,6 +168,10 @@ export const recordingResponseSchema = z.strictObject({
 
 export const artistResponseSchema = z.strictObject({
   artists: z.array(canonicalArtistSchema)
+});
+
+export const albumResponseSchema = z.strictObject({
+  albums: z.array(canonicalAlbumSchema)
 });
 
 export const lyricsResponseSchema = z.strictObject({
