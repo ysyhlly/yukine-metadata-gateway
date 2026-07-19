@@ -20,7 +20,10 @@ import {
 import { openapiDocument } from "./contracts/openapi.js";
 import {
   resolveCanonicalRecordings,
-  type SourceAttribution
+  type SourceAttribution,
+  type WorkCredit,
+  type WorkCreditRole,
+  type WorkIdentifier
 } from "./identity/recording.js";
 import {
   canonicalizeMusicBrainzRelease,
@@ -45,8 +48,11 @@ interface RecordingEvidence {
   coverUrl: string;
   durationMs?: number;
   isrc?: string;
+  isrcs?: string[];
   recordingMbid?: string;
   workMbid?: string;
+  workIdentifiers?: WorkIdentifier[];
+  workCredits?: WorkCredit[];
   acoustId?: string;
   fingerprintVerified?: boolean;
   score: number;
@@ -974,11 +980,20 @@ async function acoustIdLookup(
 }
 
 function mapMbRecordings(values: unknown[], exact: boolean): RecordingEvidence[] {
+  const verifiedAt = Date.now();
   return values.map((raw) => {
     const item = object(raw);
     const credits = array(item, "artist-credit");
     const relations = array(item, "relations").map(object);
-    const work = relations.find((relation) => relation.type === "performance");
+    const works = relations
+      .filter((relation) => relation.type === "performance")
+      .map((relation) => object(relation.work))
+      .filter((work) => string(work.id));
+    const isrcs = [...new Set(
+      array(item, "isrcs").map((value) => normalizeIsrc(string(value))).filter(Boolean)
+    )];
+    const workIdentifiers = mapMbWorkIdentifiers(works, verifiedAt);
+    const workCredits = mapMbWorkCredits(works, verifiedAt);
     const releases = array(item, "releases").map(object);
     const release = releases[0] || {};
     const artworkRelease = releases.find((candidate) =>
@@ -1004,12 +1019,87 @@ function mapMbRecordings(values: unknown[], exact: boolean): RecordingEvidence[]
         ? `https://coverartarchive.org/release/${artworkReleaseId}/front-500`
         : "",
       durationMs: number(item.length, 0),
-      isrc: string(array(item, "isrcs")[0]),
+      isrc: isrcs[0] || "",
+      ...(isrcs.length ? { isrcs } : {}),
       recordingMbid: string(item.id),
-      workMbid: string(object(work?.work).id),
+      workMbid: string(works[0]?.id),
+      ...(workIdentifiers.length ? { workIdentifiers } : {}),
+      ...(workCredits.length ? { workCredits } : {}),
       score: exact ? 1 : number(item.score, 0) / 100
     };
   }).filter((item) => item.id && item.title);
+}
+
+function mapMbWorkIdentifiers(
+  works: Record<string, unknown>[],
+  verifiedAt: number
+): WorkIdentifier[] {
+  return works.flatMap((work) => {
+    const workMbid = string(work.id).trim().toLowerCase();
+    const iswcs = [...new Set([
+      ...array(work, "iswcs").map(string),
+      string(work.iswc)
+    ].map((value) => value.trim().toUpperCase()).filter(Boolean))];
+    return [
+      ...(workMbid ? [{
+        type: "MUSICBRAINZ_WORK_ID" as const,
+        namespace: "",
+        value: workMbid,
+        source: "musicbrainz",
+        confidence: 1,
+        verifiedAt
+      }] : []),
+      ...iswcs.map((value) => ({
+        type: "ISWC" as const,
+        namespace: "iswc",
+        value,
+        source: "musicbrainz",
+        confidence: 1,
+        verifiedAt
+      }))
+    ];
+  });
+}
+
+function mapMbWorkCredits(
+  works: Record<string, unknown>[],
+  verifiedAt: number
+): WorkCredit[] {
+  return works.flatMap((work) =>
+    array(work, "relations").flatMap((rawRelation) => {
+      const relation = object(rawRelation);
+      const role = workCreditRole(string(relation.type));
+      const artist = object(relation.artist);
+      const artistId = string(artist.id).trim().toLowerCase();
+      const name = (string(relation["target-credit"]) || string(artist.name)).trim();
+      if (!role || !artistId || !name) return [];
+      return [{
+        artistId,
+        name,
+        role,
+        source: "musicbrainz",
+        confidence: 0.9,
+        verifiedAt
+      }];
+    })
+  );
+}
+
+function workCreditRole(value: string): WorkCreditRole | undefined {
+  switch (value.trim().toLowerCase()) {
+    case "composer":
+      return "COMPOSER";
+    case "writer":
+    case "songwriter":
+      return "SONGWRITER";
+    case "lyricist":
+      return "LYRICIST";
+    case "publisher":
+    case "publishing":
+      return "PUBLISHER";
+    default:
+      return undefined;
+  }
 }
 
 async function itunesLookup(
@@ -1172,6 +1262,10 @@ function uuid(value: string | null): string {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(candidate)
     ? candidate
     : "";
+}
+
+function normalizeIsrc(value: string): string {
+  return value.replace(/[^a-z0-9]/giu, "").toUpperCase();
 }
 
 function integer(value: string | null, min: number, max: number): number {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleGatewayRequest } from "../src/core.js";
+import type { CanonicalRecording } from "../src/identity/recording.js";
+import { musicBrainzRecordingsByIsrc } from "../src/providers/requests.js";
 import type {
   GatewayContext,
   UpstreamJsonResult,
@@ -8,6 +10,7 @@ import type {
 } from "../src/types.js";
 
 const RECORDING_ID = "12345678-1234-4123-8123-123456789abc";
+const WORK_ID = "52345678-1234-4123-8123-123456789abc";
 const RELEASE_GROUP_ID = "22345678-1234-4123-8123-123456789abc";
 const RELEASE_ID = "32345678-1234-4123-8123-123456789abc";
 const OTHER_RELEASE_GROUP_ID = "42345678-1234-4123-8123-123456789abc";
@@ -61,6 +64,132 @@ test("v2 recording search merges MusicBrainz and iTunes evidence", async () => {
     "musicbrainz",
     "itunes"
   ]);
+});
+
+test("v2 recording lookup exposes optional multi-value work metadata and legacy identifiers", async () => {
+  const creditIds = {
+    COMPOSER: "62345678-1234-4123-8123-123456789abc",
+    SONGWRITER: "72345678-1234-4123-8123-123456789abc",
+    LYRICIST: "82345678-1234-4123-8123-123456789abc",
+    PUBLISHER: "92345678-1234-4123-8123-123456789abc"
+  } as const;
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname === `/ws/2/recording/${RECORDING_ID}`) {
+      return success(url, {
+        id: RECORDING_ID,
+        title: "作品",
+        length: 180_000,
+        isrcs: ["US-RC1-76-07839", "JPABC1234567"],
+        "artist-credit": [{
+          name: "演唱者",
+          artist: { id: "artist-id", name: "演唱者" }
+        }],
+        relations: [{
+          type: "performance",
+          work: {
+            id: WORK_ID.toUpperCase(),
+            iswcs: ["T-123.456.789-0"],
+            relations: [
+              mbWorkCredit("composer", creditIds.COMPOSER, "作曲者"),
+              mbWorkCredit("writer", creditIds.SONGWRITER, "词曲作者"),
+              mbWorkCredit("lyricist", creditIds.LYRICIST, "作词者"),
+              mbWorkCredit("publishing", creditIds.PUBLISHER, "出版者"),
+              mbWorkCredit("arranger", RECORDING_ID, "编曲者")
+            ]
+          }
+        }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, { recordings: [] });
+    }
+    if (url.hostname === "itunes.apple.com") {
+      return success(url, { results: [] });
+    }
+    return failure(url, 500);
+  });
+  const before = Date.now();
+
+  const response = await request(
+    `/v2/recordings/search?recordingMbid=${RECORDING_ID}`,
+    transport
+  );
+  const after = Date.now();
+  const recording = (response.body as { recordings: CanonicalRecording[] }).recordings[0];
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(recording?.identifiers, {
+    recordingMbid: RECORDING_ID,
+    workMbid: WORK_ID,
+    isrc: "USRC17607839"
+  });
+  assert.deepEqual(recording?.isrcs, ["USRC17607839", "JPABC1234567"]);
+  assert.deepEqual(recording?.workIdentifiers?.map(({ verifiedAt, ...identifier }) => identifier), [
+    {
+      type: "MUSICBRAINZ_WORK_ID",
+      namespace: "",
+      value: WORK_ID,
+      source: "musicbrainz",
+      confidence: 1
+    },
+    {
+      type: "ISWC",
+      namespace: "iswc",
+      value: "T-123.456.789-0",
+      source: "musicbrainz",
+      confidence: 1
+    }
+  ]);
+  assert.deepEqual(recording?.workCredits?.map(({ verifiedAt, ...credit }) => credit), [
+    {
+      artistId: creditIds.COMPOSER,
+      name: "作曲者",
+      role: "COMPOSER",
+      source: "musicbrainz",
+      confidence: 0.9
+    },
+    {
+      artistId: creditIds.SONGWRITER,
+      name: "词曲作者",
+      role: "SONGWRITER",
+      source: "musicbrainz",
+      confidence: 0.9
+    },
+    {
+      artistId: creditIds.LYRICIST,
+      name: "作词者",
+      role: "LYRICIST",
+      source: "musicbrainz",
+      confidence: 0.9
+    },
+    {
+      artistId: creditIds.PUBLISHER,
+      name: "出版者",
+      role: "PUBLISHER",
+      source: "musicbrainz",
+      confidence: 0.9
+    }
+  ]);
+  for (const item of [
+    ...(recording?.workIdentifiers || []),
+    ...(recording?.workCredits || [])
+  ]) {
+    assert.ok(item.verifiedAt >= before && item.verifiedAt <= after);
+  }
+  assert.equal(
+    transport.urls[0]?.searchParams.get("inc"),
+    "artists isrcs releases work-rels work-level-rels artist-rels"
+  );
+});
+
+test("MusicBrainz ISRC lookup uses only inc parameters accepted by the ISRC resource", () => {
+  const url = new URL(musicBrainzRecordingsByIsrc("USRC17607839"));
+
+  assert.equal(
+    url.searchParams.get("inc"),
+    "artist-credits isrcs releases work-rels"
+  );
+  assert.doesNotMatch(url.searchParams.get("inc") || "", /work-level-rels/);
 });
 
 test("v2 validates present query parameters without echoing values", async () => {
@@ -416,4 +545,12 @@ function objectFixture(result: UpstreamJsonResult): Record<string, unknown> {
   return result.kind === "success" && result.data && typeof result.data === "object"
     ? result.data as Record<string, unknown>
     : {};
+}
+
+function mbWorkCredit(type: string, artistId: string, name: string): Record<string, unknown> {
+  return {
+    type,
+    "target-credit": name,
+    artist: { id: artistId, name }
+  };
 }

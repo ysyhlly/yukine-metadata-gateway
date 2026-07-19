@@ -4,6 +4,28 @@ export interface RecordingArtistEvidence {
   sortName?: string;
 }
 
+export type WorkIdentifierType = "MUSICBRAINZ_WORK_ID" | "ISWC";
+
+export interface WorkIdentifier {
+  type: WorkIdentifierType;
+  namespace: string;
+  value: string;
+  source: string;
+  confidence: number;
+  verifiedAt: number;
+}
+
+export type WorkCreditRole = "COMPOSER" | "SONGWRITER" | "LYRICIST" | "PUBLISHER";
+
+export interface WorkCredit {
+  artistId: string;
+  name: string;
+  role: WorkCreditRole;
+  source: string;
+  confidence: number;
+  verifiedAt: number;
+}
+
 export interface RecordingEvidenceLike {
   provider: string;
   id: string;
@@ -13,8 +35,11 @@ export interface RecordingEvidenceLike {
   coverUrl: string;
   durationMs?: number;
   isrc?: string;
+  isrcs?: string[];
   recordingMbid?: string;
   workMbid?: string;
+  workIdentifiers?: WorkIdentifier[];
+  workCredits?: WorkCredit[];
   acoustId?: string;
   fingerprintVerified?: boolean;
   score: number;
@@ -42,6 +67,9 @@ export interface CanonicalRecording {
     isrc?: string;
     acoustId?: string;
   };
+  isrcs?: string[];
+  workIdentifiers?: WorkIdentifier[];
+  workCredits?: WorkCredit[];
   fingerprintVerified: boolean;
   confidence: number;
   sources: SourceAttribution[];
@@ -129,10 +157,13 @@ export function matchRecordings(
       ? match(1, "recording_mbid")
       : blocked();
   }
-  const leftIsrc = normalizeIsrc(left.isrc);
-  const rightIsrc = normalizeIsrc(right.isrc);
-  if (leftIsrc && rightIsrc) {
-    return leftIsrc === rightIsrc ? match(0.99, "isrc") : blocked();
+  const leftIsrcs = normalizedIsrcs(left);
+  const rightIsrcs = normalizedIsrcs(right);
+  if (leftIsrcs.length && rightIsrcs.length) {
+    const rightSet = new Set(rightIsrcs);
+    return leftIsrcs.some((value) => rightSet.has(value))
+      ? match(0.99, "isrc")
+      : blocked();
   }
   if (
     left.fingerprintVerified
@@ -195,9 +226,19 @@ function canonicalizeGroup(group: Group): CanonicalRecording {
   const values = [...group.evidence].sort(compareEvidence);
   const primary = values[0]!;
   const mbid = first(values.map((value) => normalizeId(value.recordingMbid)));
-  const isrc = first(values.map((value) => normalizeIsrc(value.isrc)));
+  const isrcs = uniqueStrings(values.flatMap(normalizedIsrcs));
+  const isrc = isrcs[0] || "";
   const acoustId = first(values.map((value) => normalizeId(value.acoustId)));
-  const workMbid = first(values.map((value) => normalizeId(value.workMbid)));
+  const workIdentifiers = uniqueWorkIdentifiers(
+    values.flatMap((value) => value.workIdentifiers || [])
+  );
+  const workMbid = first([
+    ...values.map((value) => normalizeId(value.workMbid)),
+    ...workIdentifiers
+      .filter((identifier) => identifier.type === "MUSICBRAINZ_WORK_ID")
+      .map((identifier) => normalizeId(identifier.value))
+  ]);
+  const workCredits = uniqueWorkCredits(values.flatMap((value) => value.workCredits || []));
   const cover = values.find((value) =>
     value.provider === "musicbrainz" && value.coverUrl
   )?.coverUrl || values.find((value) => value.coverUrl)?.coverUrl || "";
@@ -225,6 +266,9 @@ function canonicalizeGroup(group: Group): CanonicalRecording {
       ...(isrc ? { isrc } : {}),
       ...(acoustId ? { acoustId } : {})
     },
+    ...(isrcs.length ? { isrcs } : {}),
+    ...(workIdentifiers.length ? { workIdentifiers } : {}),
+    ...(workCredits.length ? { workCredits } : {}),
     fingerprintVerified: values.some((value) => value.fingerprintVerified),
     confidence: round(Math.max(...sources.map((source) => source.confidence))),
     sources,
@@ -269,6 +313,9 @@ function sourceFields(value: RecordingEvidenceLike): string[] {
     value.recordingMbid ? "identifiers.recordingMbid" : "",
     value.workMbid ? "identifiers.workMbid" : "",
     value.isrc ? "identifiers.isrc" : "",
+    value.isrcs?.length ? "isrcs" : "",
+    value.workIdentifiers?.length ? "workIdentifiers" : "",
+    value.workCredits?.length ? "workCredits" : "",
     value.acoustId ? "identifiers.acoustId" : ""
   ].filter(Boolean);
 }
@@ -315,12 +362,65 @@ function normalizeIsrc(value: string | undefined): string {
   return value?.replace(/[^a-z0-9]/giu, "").toUpperCase() || "";
 }
 
+function normalizedIsrcs(value: RecordingEvidenceLike): string[] {
+  return uniqueStrings([
+    normalizeIsrc(value.isrc),
+    ...(value.isrcs || []).map(normalizeIsrc)
+  ]);
+}
+
 function sourceKey(value: RecordingEvidenceLike): string {
   return `${value.provider}\u0000${value.id}`;
 }
 
 function first(values: string[]): string {
   return values.find(Boolean) || "";
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function uniqueWorkIdentifiers(values: WorkIdentifier[]): WorkIdentifier[] {
+  const unique = new Map<string, WorkIdentifier>();
+  for (const value of values) {
+    const normalizedValue = value.type === "MUSICBRAINZ_WORK_ID"
+      ? normalizeId(value.value)
+      : value.value.trim().toUpperCase();
+    if (!normalizedValue) continue;
+    const normalized = {
+      ...value,
+      namespace: value.namespace.trim(),
+      value: normalizedValue,
+      source: value.source.trim(),
+      confidence: round(value.confidence),
+      verifiedAt: Math.max(0, Math.trunc(value.verifiedAt))
+    };
+    const key = `${normalized.type}\u0000${normalized.namespace.toLowerCase()}`
+      + `\u0000${normalized.value.replace(/[^a-z0-9]/giu, "").toUpperCase()}`;
+    if (!unique.has(key)) unique.set(key, normalized);
+  }
+  return [...unique.values()];
+}
+
+function uniqueWorkCredits(values: WorkCredit[]): WorkCredit[] {
+  const unique = new Map<string, WorkCredit>();
+  for (const value of values) {
+    const artistId = normalizeId(value.artistId);
+    const name = value.name.trim();
+    if (!artistId || !name) continue;
+    const normalized = {
+      ...value,
+      artistId,
+      name,
+      source: value.source.trim(),
+      confidence: round(value.confidence),
+      verifiedAt: Math.max(0, Math.trunc(value.verifiedAt))
+    };
+    const key = `${normalized.artistId}\u0000${normalized.role}`;
+    if (!unique.has(key)) unique.set(key, normalized);
+  }
+  return [...unique.values()];
 }
 
 function positive(value: number | undefined): boolean {

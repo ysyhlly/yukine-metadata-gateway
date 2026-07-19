@@ -1287,6 +1287,106 @@
                             },
                             "additionalProperties": false
                           },
+                          "isrcs": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "workIdentifiers": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "MUSICBRAINZ_WORK_ID",
+                                    "ISWC"
+                                  ]
+                                },
+                                "namespace": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "source": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "confidence": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "verifiedAt": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "namespace",
+                                "value",
+                                "source",
+                                "confidence",
+                                "verifiedAt"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "workCredits": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "artistId": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "name": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "role": {
+                                  "type": "string",
+                                  "enum": [
+                                    "COMPOSER",
+                                    "SONGWRITER",
+                                    "LYRICIST",
+                                    "PUBLISHER"
+                                  ]
+                                },
+                                "source": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "confidence": {
+                                  "type": "number",
+                                  "minimum": 0,
+                                  "maximum": 1
+                                },
+                                "verifiedAt": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                }
+                              },
+                              "required": [
+                                "artistId",
+                                "name",
+                                "role",
+                                "source",
+                                "confidence",
+                                "verifiedAt"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
                           "fingerprintVerified": {
                             "type": "boolean"
                           },

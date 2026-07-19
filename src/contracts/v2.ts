@@ -88,6 +88,24 @@ const artistReferenceSchema = z.strictObject({
   sortName: z.string().optional()
 });
 
+const workIdentifierSchema = z.strictObject({
+  type: z.enum(["MUSICBRAINZ_WORK_ID", "ISWC"]),
+  namespace: z.string(),
+  value: z.string().min(1),
+  source: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  verifiedAt: z.number().int().nonnegative()
+});
+
+const workCreditSchema = z.strictObject({
+  artistId: z.string().min(1),
+  name: z.string().min(1),
+  role: z.enum(["COMPOSER", "SONGWRITER", "LYRICIST", "PUBLISHER"]),
+  source: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  verifiedAt: z.number().int().nonnegative()
+});
+
 export const canonicalRecordingSchema: z.ZodType<CanonicalRecording> = z.strictObject({
   canonicalId: z.string().min(1),
   title: z.string(),
@@ -101,6 +119,9 @@ export const canonicalRecordingSchema: z.ZodType<CanonicalRecording> = z.strictO
     isrc: z.string().optional(),
     acoustId: z.string().optional()
   }),
+  isrcs: z.array(z.string().min(1)).optional(),
+  workIdentifiers: z.array(workIdentifierSchema).optional(),
+  workCredits: z.array(workCreditSchema).optional(),
   fingerprintVerified: z.boolean(),
   confidence: z.number().min(0).max(1),
   sources: z.array(sourceAttributionSchema),

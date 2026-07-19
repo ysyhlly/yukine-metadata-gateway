@@ -70,6 +70,31 @@ test("missing duration caps text matches below the automatic merge threshold", (
   assert.equal(resolved[0]?.possibleDuplicates.length, 1);
 });
 
+test("identity resolver matches any shared ISRC while retaining the primary legacy value", () => {
+  const left = evidence({
+    id: "left",
+    isrc: "USAAA1000001",
+    isrcs: ["USAAA1000001", "JPAAA1000002"]
+  });
+  const right = evidence({
+    provider: "itunes",
+    id: "right",
+    isrc: "GBAAA1000003",
+    isrcs: ["GBAAA1000003", "JP-AAA-10-00002"]
+  });
+
+  const resolved = resolveCanonicalRecordings([right, left]);
+
+  assert.equal(matchRecordings(left, right).confidence, 0.99);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0]?.identifiers.isrc, "USAAA1000001");
+  assert.deepEqual(resolved[0]?.isrcs, [
+    "USAAA1000001",
+    "JPAAA1000002",
+    "GBAAA1000003"
+  ]);
+});
+
 test("normalization preserves version meaning while normalizing Unicode text", () => {
   const normalized = normalizeMetadataText("  Ｈａｌｏ（Live） feat. Guest ");
 
@@ -92,6 +117,75 @@ test("resolver output is deterministic regardless of provider result order", () 
     resolveCanonicalRecordings(values),
     resolveCanonicalRecordings([...values].reverse())
   );
+});
+
+test("resolver exposes multi-value recording and work metadata while retaining legacy identifiers", () => {
+  const verifiedAt = 1_784_420_000_000;
+  const resolved = resolveCanonicalRecordings([evidence({
+    isrc: "us-rc1-76-07839",
+    isrcs: ["USRC17607839", "JPABC1234567", "US-RC1-76-07839"],
+    workIdentifiers: [
+      {
+        type: "MUSICBRAINZ_WORK_ID",
+        namespace: "",
+        value: "WORK-UUID",
+        source: "musicbrainz",
+        confidence: 1,
+        verifiedAt
+      },
+      {
+        type: "ISWC",
+        namespace: "iswc",
+        value: "t-123.456.789-0",
+        source: "musicbrainz",
+        confidence: 1,
+        verifiedAt
+      }
+    ],
+    workCredits: [{
+      artistId: "ARTIST-MBID",
+      name: "作者名",
+      role: "COMPOSER",
+      source: "musicbrainz",
+      confidence: 0.9,
+      verifiedAt
+    }]
+  })])[0];
+
+  assert.deepEqual(resolved?.identifiers, {
+    workMbid: "work-uuid",
+    isrc: "USRC17607839"
+  });
+  assert.deepEqual(resolved?.isrcs, ["USRC17607839", "JPABC1234567"]);
+  assert.deepEqual(resolved?.workIdentifiers, [
+    {
+      type: "MUSICBRAINZ_WORK_ID",
+      namespace: "",
+      value: "work-uuid",
+      source: "musicbrainz",
+      confidence: 1,
+      verifiedAt
+    },
+    {
+      type: "ISWC",
+      namespace: "iswc",
+      value: "T-123.456.789-0",
+      source: "musicbrainz",
+      confidence: 1,
+      verifiedAt
+    }
+  ]);
+  assert.deepEqual(resolved?.workCredits, [{
+    artistId: "artist-mbid",
+    name: "作者名",
+    role: "COMPOSER",
+    source: "musicbrainz",
+    confidence: 0.9,
+    verifiedAt
+  }]);
+  assert.deepEqual(resolved?.sources[0]?.fields.filter((field) =>
+    ["isrcs", "workIdentifiers", "workCredits"].includes(field)
+  ), ["isrcs", "workIdentifiers", "workCredits"]);
 });
 
 function evidence(overrides: Partial<RecordingEvidenceLike> = {}): RecordingEvidenceLike {

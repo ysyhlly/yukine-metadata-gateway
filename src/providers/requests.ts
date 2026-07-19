@@ -10,12 +10,12 @@ import {
 
 export function musicBrainzRecordingById(id: string): string {
   return `${MUSICBRAINZ_API}recording/${encodeURIComponent(id)}`
-    + "?inc=artists+isrcs+releases+work-rels&fmt=json";
+    + "?inc=artists+isrcs+releases+work-rels+work-level-rels+artist-rels&fmt=json";
 }
 
 export function musicBrainzRecordingsByIsrc(isrc: string): string {
   return `${MUSICBRAINZ_API}isrc/${encodeURIComponent(isrc)}`
-    + "?inc=artist-credits+releases+work-rels&fmt=json";
+    + "?inc=artist-credits+isrcs+releases+work-rels&fmt=json";
 }
 
 export function musicBrainzRecordingSearch(clauses: string[], limit: number): string {
