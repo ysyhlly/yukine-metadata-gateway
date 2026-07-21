@@ -237,11 +237,12 @@ test("v2 artist response attributes identity and enrichment sources", async () =
 
   const response = await request("/v2/artists/search?name=Aimer", transport);
   const artist = (response.body as {
-    artists: Array<{ canonicalId: string; sources: Array<{ provider: string }> }>;
+    artists: Array<{ canonicalId: string; biography: string; sources: Array<{ provider: string }> }>;
   }).artists[0];
 
   assert.equal(response.status, 200);
   assert.equal(artist?.canonicalId, `artist:mbid:${RECORDING_ID}`);
+  assert.equal(typeof artist?.biography, "string");
   assert.deepEqual(artist?.sources.map((source) => source.provider), [
     "musicbrainz",
     "wikidata"
@@ -443,6 +444,91 @@ test("v2 lyrics preserves null semantics and exact match attribution", async () 
   assert.deepEqual(lyrics.sources[0]?.matchedBy, ["exact_metadata"]);
 });
 
+test("v2 lyrics includes optional wordLyrics with netease source attribution", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: { songs: [{ id: 12345, name: "Song" }] }
+      });
+    }
+    if (url.pathname === "/api/song/lyric") {
+      return success(url, {
+        code: 200,
+        yrc: { lyric: "[00:01.00](0,500)H(500,300)e(800,200)llo" }
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request("/v2/lyrics/search?title=Song&artist=Artist", transport);
+  const lyrics = (response.body as {
+    lyrics: {
+      canonicalId: string;
+      wordLyrics?: string;
+      wordLyricsSource?: string;
+      sources: Array<{ provider: string; role: string; matchedBy: string[] }>;
+    };
+  }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.wordLyrics, "[00:01.00](0,500)H(500,300)e(800,200)llo");
+  assert.equal(lyrics.wordLyricsSource, "netease");
+  assert.equal(lyrics.sources.length, 2);
+  assert.equal(lyrics.sources[1]?.provider, "netease");
+  assert.equal(lyrics.sources[1]?.role, "enrichment");
+  assert.deepEqual(lyrics.sources[1]?.matchedBy, ["song_search"]);
+});
+
+test("v2 lyrics schema validates with and without wordLyrics", async () => {
+  const withWord = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1, trackName: "Song", artistName: "A", albumName: "B",
+        duration: 100, syncedLyrics: "[00:01.00]X", plainLyrics: "X"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, { code: 200, result: { songs: [{ id: 1, name: "Song" }] } });
+    }
+    if (url.pathname === "/api/song/lyric") {
+      return success(url, { code: 200, yrc: { lyric: "[00:01.00](0,100)X" } });
+    }
+    return success(url, []);
+  });
+  const withoutWord = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 2, trackName: "Song", artistName: "A", albumName: "B",
+        duration: 100, syncedLyrics: "[00:01.00]X", plainLyrics: "X"
+      });
+    }
+    if (url.hostname === "music.163.com") return failure(url, 503);
+    return success(url, []);
+  });
+
+  const resWith = await request("/v2/lyrics/search?title=Song", withWord);
+  const resWithout = await request("/v2/lyrics/search?title=Song", withoutWord);
+
+  assert.equal(resWith.status, 200);
+  assert.equal(resWithout.status, 200);
+  const lyricsWith = (resWith.body as { lyrics: { wordLyrics?: string } }).lyrics;
+  const lyricsWithout = (resWithout.body as { lyrics: { wordLyrics?: string } }).lyrics;
+  assert.ok(lyricsWith.wordLyrics);
+  assert.equal(lyricsWithout.wordLyrics, undefined);
+});
+
 test("readiness and OpenAPI are available in the shared runtime", async () => {
   const unavailable = await request("/ready", new FixtureTransport(), {
     ready: () => false
@@ -489,6 +575,104 @@ test("v2 feature flag and v1 sunset headers preserve the release boundary", asyn
   assert.equal(sunset.headers.Deprecation, "true");
   assert.equal(sunset.headers.Sunset, "Wed, 21 Oct 2026 07:28:00 GMT");
   assert.equal(sunset.headers.Link, '</openapi.json>; rel="service-desc"');
+});
+
+test("v2 artist search falls back to netease when musicbrainz returns empty", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, { artists: [] });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, { artists: [] });
+    }
+    if (url.hostname === "music.163.com" && url.pathname.includes("/api/cloudsearch")) {
+      return success(url, {
+        code: 200,
+        result: {
+          artists: [{
+            id: "12345",
+            name: "测试歌手",
+            picUrl: "https://p1.music.126.net/test.jpg",
+            alias: "别名"
+          }]
+        }
+      });
+    }
+    if (url.hostname === "music.163.com" && url.pathname.includes("/api/artist/introduction")) {
+      return success(url, {
+        code: 200,
+        briefDesc: "简短介绍",
+        introduction: [{ ti: "介绍", txt: "完整传记段落一。\n段落二。" }]
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v2/artists/search?name=测试歌手", transport);
+  const artist = (response.body as {
+    artists: Array<{
+      canonicalId: string;
+      name: string;
+      avatarUrl: string;
+      description: string;
+      biography: string;
+      sources: Array<{ provider: string }>;
+    }>;
+  }).artists[0];
+
+  assert.equal(response.status, 200);
+  assert.equal(artist?.canonicalId, "artist:netease:12345");
+  assert.equal(artist?.name, "测试歌手");
+  assert.equal(artist?.avatarUrl, "https://p1.music.126.net/test.jpg");
+  assert.ok(artist?.biography.length > 0);
+  assert.equal(artist?.sources[0]?.provider, "netease");
+});
+
+test("v2 artist biography contains full introduction while description stays short", async () => {
+  const longText = "A".repeat(1200);
+  const transport = new FixtureTransport((url) => {
+    if (url.hostname === "musicbrainz.org" && url.pathname.endsWith("/artist/")) {
+      return success(url, {
+        artists: [{ id: RECORDING_ID, name: "TestArtist", score: 100 }]
+      });
+    }
+    if (url.hostname === "musicbrainz.org") {
+      return success(url, {
+        id: RECORDING_ID,
+        name: "TestArtist",
+        relations: []
+      });
+    }
+    if (url.hostname === "music.163.com" && url.pathname.includes("/api/cloudsearch")) {
+      return success(url, {
+        code: 200,
+        result: {
+          artists: [{ id: "99999", name: "TestArtist", picUrl: "https://p1.music.126.net/pic.jpg" }]
+        }
+      });
+    }
+    if (url.hostname === "music.163.com" && url.pathname.includes("/api/artist/introduction")) {
+      return success(url, {
+        code: 200,
+        briefDesc: "短描述",
+        introduction: [
+          { ti: "生平", txt: longText },
+          { ti: "成就", txt: "第二段内容。" }
+        ]
+      });
+    }
+    return failure(url, 500);
+  });
+
+  const response = await request("/v2/artists/search?name=TestArtist", transport);
+  const artist = (response.body as {
+    artists: Array<{ description: string; biography: string }>;
+  }).artists[0];
+
+  assert.equal(response.status, 200);
+  assert.ok(artist?.description.length <= 1000);
+  assert.ok(artist?.biography.includes("第二段内容。"));
+  assert.ok(artist?.biography.length > artist?.description.length);
 });
 
 async function request(

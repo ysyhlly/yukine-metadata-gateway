@@ -1623,6 +1623,9 @@
                           "description": {
                             "type": "string"
                           },
+                          "biography": {
+                            "type": "string"
+                          },
                           "confidence": {
                             "type": "number",
                             "minimum": 0,
@@ -1688,6 +1691,7 @@
                           "identifiers",
                           "avatarUrl",
                           "description",
+                          "biography",
                           "confidence",
                           "sources"
                         ],
@@ -2039,6 +2043,14 @@
               "type": "string",
               "pattern": "^\\d+$"
             }
+          },
+          {
+            "in": "query",
+            "name": "neteaseSongId",
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,19}$"
+            }
           }
         ],
         "responses": {
@@ -2075,6 +2087,12 @@
                               "type": "string"
                             },
                             "plainLyrics": {
+                              "type": "string"
+                            },
+                            "wordLyrics": {
+                              "type": "string"
+                            },
+                            "wordLyricsSource": {
                               "type": "string"
                             },
                             "confidence": {

@@ -13,6 +13,8 @@ export type ProviderName =
   | "wikidata"
   | "netease"
   | "lrclib"
+  | "qqmusic"
+  | "kugou"
   | "unknown";
 
 export type ProviderCapability =
@@ -95,6 +97,8 @@ export const DEFAULT_PROVIDER_POLICIES: Record<ProviderName, ProviderPolicy> = {
   wikidata: policy(5, 3_500),
   netease: policy(10, 2_500),
   lrclib: policy(10, 3_500),
+  qqmusic: policy(10, 2_500),
+  kugou: policy(10, 2_500),
   unknown: policy(10, 4_500)
 };
 
@@ -121,5 +125,7 @@ export function providerForUrl(value: string): ProviderName {
   if (host === "www.wikidata.org") return "wikidata";
   if (host === "music.163.com") return "netease";
   if (host === "lrclib.net") return "lrclib";
+  if (host === "c.y.qq.com" || host === "u.y.qq.com") return "qqmusic";
+  if (host.endsWith("kugou.com")) return "kugou";
   return "unknown";
 }

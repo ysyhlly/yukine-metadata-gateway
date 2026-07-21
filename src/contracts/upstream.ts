@@ -55,3 +55,32 @@ export const neteaseResponseSchema = z.looseObject({
 
 export const lrclibExactResponseSchema = looseObject;
 export const lrclibSearchResponseSchema = z.array(looseObject);
+
+export const neteaseLyricsResponseSchema = z.looseObject({
+  code: z.number(),
+  lrc: z.looseObject({ lyric: z.string().optional() }).optional(),
+  yrc: z.looseObject({ lyric: z.string().optional() }).optional()
+});
+
+export const qqMusicResponseSchema = z.looseObject({
+  code: z.number()
+});
+
+export const qqMusicLyricsResponseSchema = z.looseObject({
+  code: z.number(),
+  lyric: z.string().optional()
+});
+
+export const kugouResponseSchema = z.looseObject({
+  status: z.number()
+});
+
+export const kugouLyricsSearchResponseSchema = z.looseObject({
+  status: z.number(),
+  candidates: z.array(looseObject).optional()
+});
+
+export const kugouLyricsDownloadResponseSchema = z.looseObject({
+  status: z.number(),
+  content: z.string().optional()
+});

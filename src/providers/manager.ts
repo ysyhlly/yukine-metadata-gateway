@@ -13,6 +13,8 @@ import { ItunesProvider } from "./adapters/itunes.js";
 import { WikidataProvider } from "./adapters/wikidata.js";
 import { NeteaseProvider } from "./adapters/netease.js";
 import { LrclibProvider } from "./adapters/lrclib.js";
+import { QqMusicProvider } from "./adapters/qqmusic.js";
+import { KugouProvider } from "./adapters/kugou.js";
 
 type AnyProvider = MetadataProvider<never, UpstreamJsonResult>;
 
@@ -29,7 +31,9 @@ export class DefaultProviderManager implements ProviderManagerContract {
       new ItunesProvider(),
       new WikidataProvider(),
       new NeteaseProvider(),
-      new LrclibProvider()
+      new LrclibProvider(),
+      new QqMusicProvider(),
+      new KugouProvider()
     ]) {
       this.providers.set(provider.name, provider as AnyProvider);
     }

@@ -65,7 +65,8 @@ export const lyricsQuerySchema = z.strictObject({
   title: boundedText(300),
   artist: boundedText(300).optional(),
   album: boundedText(300).optional(),
-  durationMs: numericQuery(1, 7_200_000).optional()
+  durationMs: numericQuery(1, 7_200_000).optional(),
+  neteaseSongId: z.string().regex(/^\d{1,19}$/u).optional()
 });
 
 export type RecordingV2Query = z.output<typeof recordingQuerySchema>;
@@ -144,6 +145,7 @@ export const canonicalArtistSchema = z.strictObject({
   }),
   avatarUrl: z.string(),
   description: z.string(),
+  biography: z.string(),
   confidence: z.number().min(0).max(1),
   sources: z.array(sourceAttributionSchema)
 });
@@ -179,6 +181,8 @@ export const canonicalLyricsSchema = z.strictObject({
   durationMs: z.number().int().nonnegative(),
   syncedLyrics: z.string(),
   plainLyrics: z.string(),
+  wordLyrics: z.string().optional(),
+  wordLyricsSource: z.string().optional(),
   confidence: z.number().min(0).max(1),
   sources: z.array(sourceAttributionSchema)
 });

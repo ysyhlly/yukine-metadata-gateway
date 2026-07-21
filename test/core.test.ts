@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { deflateSync } from "node:zlib";
 import { handleGatewayRequest } from "../src/core.js";
 import type {
   GatewayContext,
   UpstreamJsonResult,
   UpstreamTransport
 } from "../src/types.js";
+
+const KRC_XOR_KEY = [0x40, 0x47, 0x61, 0x77, 0x5e, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2d, 0xce, 0xd2, 0x6e, 0x69];
+
+function encodeKrc(text: string): string {
+  const compressed = deflateSync(Buffer.from(text, "utf-8"));
+  const xored = Buffer.alloc(compressed.length);
+  for (let i = 0; i < compressed.length; i++) {
+    xored[i] = compressed[i]! ^ KRC_XOR_KEY[i % KRC_XOR_KEY.length]!;
+  }
+  return xored.toString("base64");
+}
 
 const RECORDING_ID = "12345678-1234-4123-8123-123456789abc";
 const RELEASE_ID = "87654321-4321-4321-8321-cba987654321";
@@ -428,7 +440,330 @@ test("lyrics races exact and search and selects the first usable record", async 
       plainLyrics: "Hello"
     }
   });
-  assert.equal(transport.urls.length, 2);
+  assert.equal(transport.urls.length, 5);
+});
+
+test("lyrics enriches word-by-word from netease when yrc available", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: { songs: [{ id: 12345, name: "Song" }] }
+      });
+    }
+    if (url.pathname === "/api/song/lyric") {
+      return success(url, {
+        code: 200,
+        lrc: { lyric: "[00:01.00]Hello" },
+        yrc: { lyric: "[00:01.00](0,500)H(500,300)e(800,200)llo" }
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.syncedLyrics, "[00:01.00]Hello");
+  assert.equal(lyrics.wordLyrics, "[00:01.00](0,500)H(500,300)e(800,200)llo");
+  assert.equal(lyrics.wordLyricsSource, "netease");
+});
+
+test("lyrics gracefully degrades when netease lyrics unavailable", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.hostname === "music.163.com") {
+      return failure(url, 503);
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.syncedLyrics, "[00:01.00]Hello");
+  assert.equal(lyrics.wordLyrics, undefined);
+  assert.equal(lyrics.wordLyricsSource, undefined);
+});
+
+test("netease song search mismatch returns no wordLyrics", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: { songs: [{ id: 99999, name: "Completely Different Title" }] }
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.syncedLyrics, "[00:01.00]Hello");
+  assert.equal(lyrics.wordLyrics, undefined);
+});
+
+test("wordLyrics truncated at 64KB boundary", async () => {
+  const longYrc = "[00:01.00]" + "x".repeat(70_000);
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: { songs: [{ id: 12345, name: "Song" }] }
+      });
+    }
+    if (url.pathname === "/api/song/lyric") {
+      return success(url, {
+        code: 200,
+        yrc: { lyric: longYrc }
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal((lyrics.wordLyrics as string).length, 65_536);
+});
+
+test("lyrics enriches word-by-word from QQ Music when QRC available", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.hostname === "c.y.qq.com" && url.pathname.includes("client_search_cp")) {
+      return success(url, {
+        code: 0,
+        data: { song: { list: [{ songname: "Song", songmid: "abc123mid" }] } }
+      });
+    }
+    if (url.hostname === "c.y.qq.com" && url.pathname.includes("fcg_query_lyric_new")) {
+      return success(url, {
+        code: 0,
+        lyric: "[00:01.00]<0,500>H<500,300>e<800,200>llo QRC"
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.wordLyrics, "[00:01.00]<0,500>H<500,300>e<800,200>llo QRC");
+  assert.equal(lyrics.wordLyricsSource, "qqmusic");
+});
+
+test("lyrics enriches word-by-word from Kugou when KRC available", async () => {
+  const krcContent = "[00:01.00]<0,500>H<500,300>e<800,200>llo KRC";
+  const encodedKrc = encodeKrc(krcContent);
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.hostname === "mobilecdn.kugou.com") {
+      return success(url, {
+        status: 1,
+        data: { info: [{ songname: "Song", hash: "ABC123HASH", duration: 180 }] }
+      });
+    }
+    if (url.hostname === "krcs.kugou.com" && url.pathname === "/search") {
+      return success(url, {
+        status: 200,
+        candidates: [{ id: "lyric-id-1", accesskey: "key123" }]
+      });
+    }
+    if (url.hostname === "krcs.kugou.com" && url.pathname === "/download") {
+      return success(url, {
+        status: 200,
+        content: encodedKrc
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.wordLyrics, krcContent);
+  assert.equal(lyrics.wordLyricsSource, "kugou");
+});
+
+test("lyrics selects best word lyrics when multiple sources return results", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: { songs: [{ id: 12345, name: "Song" }] }
+      });
+    }
+    if (url.pathname === "/api/song/lyric") {
+      return success(url, {
+        code: 200,
+        yrc: { lyric: "[00:01.00](0,500)Short" }
+      });
+    }
+    if (url.hostname === "c.y.qq.com" && url.pathname.includes("client_search_cp")) {
+      return success(url, {
+        code: 0,
+        data: { song: { list: [{ songname: "Song", songmid: "abc123mid" }] } }
+      });
+    }
+    if (url.hostname === "c.y.qq.com" && url.pathname.includes("fcg_query_lyric_new")) {
+      return success(url, {
+        code: 0,
+        lyric: "[00:01.00]<0,500>This is a much longer QRC lyrics content that should win<500,300>"
+      });
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.wordLyricsSource, "qqmusic");
+  assert.ok((lyrics.wordLyrics as string).includes("much longer"));
+});
+
+test("lyrics gracefully degrades when QQ Music and Kugou unavailable", async () => {
+  const transport = new FixtureTransport((url) => {
+    if (url.pathname.endsWith("/get")) {
+      return success(url, {
+        id: 1,
+        trackName: "Song",
+        artistName: "Artist",
+        albumName: "Album",
+        duration: 180,
+        syncedLyrics: "[00:01.00]Hello",
+        plainLyrics: "Hello"
+      });
+    }
+    if (url.pathname === "/api/cloudsearch/pc") {
+      return success(url, {
+        code: 200,
+        result: { songs: [{ id: 12345, name: "Song" }] }
+      });
+    }
+    if (url.pathname === "/api/song/lyric") {
+      return success(url, {
+        code: 200,
+        yrc: { lyric: "[00:01.00](0,500)H(500,300)e(800,200)llo" }
+      });
+    }
+    if (url.hostname === "c.y.qq.com" || url.hostname.endsWith("kugou.com")) {
+      return failure(url, 503);
+    }
+    return success(url, []);
+  });
+
+  const response = await request(
+    "/v1/lyrics/search?title=Song&artist=Artist",
+    transport
+  );
+  const lyrics = (response.body as { lyrics: Record<string, unknown> }).lyrics;
+
+  assert.equal(response.status, 200);
+  assert.equal(lyrics.wordLyrics, "[00:01.00](0,500)H(500,300)e(800,200)llo");
+  assert.equal(lyrics.wordLyricsSource, "netease");
 });
 
 test("known 404 and valid empty lyrics are 200 null", async () => {

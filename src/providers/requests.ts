@@ -1,10 +1,16 @@
 import {
   ACOUSTID_LOOKUP_API,
   ITUNES_SEARCH_API,
+  KUGOU_LYRICS_DOWNLOAD_API,
+  KUGOU_LYRICS_SEARCH_API,
+  KUGOU_SEARCH_API,
   LRCLIB_API,
   MUSICBRAINZ_API,
   NETEASE_ARTIST_INTRODUCTION_API,
+  NETEASE_LYRICS_API,
   NETEASE_SEARCH_API,
+  QQMUSIC_LYRICS_API,
+  QQMUSIC_SEARCH_API,
   WIKIDATA_API
 } from "./endpoints.js";
 
@@ -94,4 +100,56 @@ export function lrclibExactRequest(query: URLSearchParams): string {
 
 export function lrclibSearchRequest(query: URLSearchParams): string {
   return `${LRCLIB_API}/search?${query}`;
+}
+
+export function neteaseSongSearchRequest(query: URLSearchParams): string {
+  return `${NETEASE_SEARCH_API}?${query}`;
+}
+
+export function neteaseLyricsRequest(songId: string): string {
+  return `${NETEASE_LYRICS_API}?${new URLSearchParams({ os: "pc", id: songId, yv: "-1" })}`;
+}
+
+export function qqMusicSongSearchRequest(query: URLSearchParams): string {
+  return `${QQMUSIC_SEARCH_API}?${query}`;
+}
+
+export function qqMusicArtistSearchRequest(query: URLSearchParams): string {
+  return `${QQMUSIC_SEARCH_API}?${query}`;
+}
+
+export function qqMusicLyricsRequest(songMid: string): string {
+  const query = new URLSearchParams({
+    g_tk: "5381",
+    format: "json",
+    nobase64: "1",
+    songmid: songMid
+  });
+  return `${QQMUSIC_LYRICS_API}?${query}`;
+}
+
+export function kugouSongSearchRequest(query: URLSearchParams): string {
+  return `${KUGOU_SEARCH_API}?${query}`;
+}
+
+export function kugouLyricsSearchRequest(hash: string, durationMs: number): string {
+  const query = new URLSearchParams({
+    ver: "1",
+    man: "yes",
+    client: "mobi",
+    hash,
+    timelength: String(durationMs)
+  });
+  return `${KUGOU_LYRICS_SEARCH_API}?${query}`;
+}
+
+export function kugouLyricsDownloadRequest(id: string, accessKey: string): string {
+  const query = new URLSearchParams({
+    ver: "1",
+    client: "pc",
+    fmt: "krc",
+    id,
+    accesskey: accessKey
+  });
+  return `${KUGOU_LYRICS_DOWNLOAD_API}?${query}`;
 }
