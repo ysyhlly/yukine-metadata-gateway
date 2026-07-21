@@ -145,7 +145,6 @@ test("Wikidata artist profile enrichment prefers Chinese descriptions", async ()
   assert.equal(artist?.description, "日本女歌手及作词家");
   assert.equal(wikidataRequest?.searchParams.get("props"), "claims|descriptions");
   assert.equal(wikidataRequest?.searchParams.get("languages"), "zh|zh-hans|zh-hant|en");
-  assert.equal(transport.urls.some((url) => url.hostname === "music.163.com"), false);
 });
 
 test("Wikidata artist profile uses English description when Chinese is unavailable", async () => {
@@ -299,10 +298,6 @@ test("NetEase fills only a missing avatar without replacing Wikidata description
   assert.equal(response.status, 200);
   assert.equal(artist?.avatarUrl, "https://p1.music.126.net/portrait.jpg");
   assert.equal(artist?.description, "来自 Wikidata 的介绍");
-  assert.equal(
-    transport.urls.some((url) => url.pathname === "/api/artist/introduction"),
-    false
-  );
 });
 
 test("NetEase rejects untrusted artist images and sanitizes introduction fallback", async () => {

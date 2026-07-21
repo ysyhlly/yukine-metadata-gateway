@@ -598,14 +598,14 @@ async function artists(
         });
       }
     }
-    if (!firstResult.avatarUrl || !firstResult.description) {
+    if (!firstResult.avatarUrl || !firstResult.description || !firstResult.biography) {
       const supplement = await withRequestTimeout(
         request,
         NETEASE_ENRICHMENT_TIMEOUT_MS,
         (enrichmentRequest) => neteaseArtistProfile(
           name || firstResult.name,
           [firstResult.name, name, ...firstResult.aliases],
-          !firstResult.description,
+          !firstResult.description || !firstResult.biography,
           enrichmentRequest,
           context,
           trace
